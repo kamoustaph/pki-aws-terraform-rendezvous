@@ -4,9 +4,9 @@ Projet pédagogique de Moustapha associant une application Spring Boot / Angular
 
 ## État du projet
 
-Le projet commence par la construction de modules Terraform pour le réseau, les groupes de sécurité et une base de données RDS MySQL sur AWS. L'application et la PKI sont développées séparément et seront intégrées progressivement.
+Le projet commence par la construction de modules Terraform pour le réseau, les groupes de sécurité, une base RDS MySQL et une instance EC2 sur AWS. L'application et la PKI sont développées séparément et seront intégrées progressivement.
 
-Aucun déploiement AWS ni résultat de validation Terraform n'est confirmé à ce stade.
+Aucun déploiement des modules Terraform ni résultat de validation Terraform n'est confirmé à ce stade. Une paire de clés SSH a été créée manuellement et son existence a été vérifiée à Paris (`eu-west-3`).
 
 | Composant | État |
 |---|---|
@@ -15,8 +15,9 @@ Aucun déploiement AWS ni résultat de validation Terraform n'est confirmé à c
 | Module RDS MySQL | Code initial examiné ; version corrigée et commentée proposée ; application locale et validation à confirmer |
 | Application de gestion de rendez-vous | Développement commencé ; intégration au dépôt à effectuer |
 | EJBCA / SoftHSM / Docker | Travail existant séparé ; partie révocation en cours |
-| Configuration racine appelant les modules VPC, Security et RDS | À ajouter |
-| Infrastructure EC2 | Prévue |
+| Configuration racine appelant les modules VPC, Security, RDS et EC2 | À ajouter |
+| Module EC2 | Code initial examiné ; corrections et documentation proposées ; application locale et validation à confirmer |
+| Paire de clés SSH EC2 | `terraformcloud` créée et vérifiée à Paris ; connexion SSH non testée |
 | Configuration et déploiement Ansible | Prévus |
 | Workflows GitHub Actions | Prévus |
 | Intégration mTLS et contrôle de révocation | Prévus |
@@ -71,6 +72,12 @@ SoftHSM est une implémentation logicielle utilisée pour l'apprentissage et les
 | `modules/rds/variables.tf` | Paramètres du module RDS |
 | `modules/rds/outputs.tf` | Identifiant et informations de connexion RDS |
 | `modules/rds/README.md` | Documentation proposée du module RDS |
+| `modules/ec2/main.tf` | Instance EC2 |
+| `modules/ec2/variables.tf` | Paramètres de l'instance et de la commande SSH |
+| `modules/ec2/outputs.tf` | Identifiant, adresses et commande SSH indicative |
+| `modules/ec2/README.md` | Documentation proposée du module EC2 |
+
+Le dossier local `key/` contient les clés SSH et doit être exclu du dépôt avec `/key/` dans `.gitignore`. Il ne fait pas partie des fichiers à publier.
 
 Les répertoires de l'application, de la PKI, d'Ansible et des workflows seront ajoutés lors de leur intégration.
 
@@ -309,6 +316,98 @@ Cet exemple n'est pas une configuration racine complète. La variable racine `db
 - `sensitive = true` masque l'affichage courant du mot de passe ; avec l'argument `password`, celui-ci reste enregistré dans l'état Terraform.
 - Les politiques EC2 et S3 seules ne donnent pas les permissions de création RDS. Les droits RDS et les éventuelles dépendances IAM/KMS doivent être vérifiés.
 
+## Module EC2
+
+### Fonction et état
+
+Le module EC2 décrit une instance Linux à partir d'une AMI fournie. Il utilise un sous-réseau du module VPC et les groupes du module Security.
+
+Le code initial a été examiné et une version corrigée et commentée a été proposée. Son application locale, la validation, le déploiement et le test SSH restent à confirmer. La présence du code ne signifie pas qu'une instance est déjà créée.
+
+### Entrées proposées
+
+| Entrée | Description | Défaut |
+|---|---|---|
+| `ami` | Identifiant d'une AMI régionale compatible | Obligatoire |
+| `instance_type` | Type d'instance | `t2.micro`, disponibilité et coût à vérifier |
+| `subnet_id` | Sous-réseau d'accueil | Obligatoire |
+| `security_group_ids` | Liste des groupes de sécurité du même VPC | Obligatoire |
+| `key_name` | Nom de la paire de clés existante dans AWS | `terraformcloud` |
+| `ssh_user` | Compte Linux de connexion | `ubuntu` |
+| `private_key_path` | Chemin local utilisé pour afficher la commande SSH | `./key/terraformcloud.pem` |
+| `env` | Environnement | `dev` |
+| `project_name` | Nom du projet | `moustapha` |
+
+Le module corrigé utilise `vpc_security_group_ids` pour associer les groupes par leurs identifiants. Le compte `ubuntu` suppose une AMI Ubuntu ; une AMI Amazon Linux utilise habituellement `ec2-user`.
+
+### Sorties proposées
+
+| Sortie | Description |
+|---|---|
+| `ec2_public_ip` | IPv4 publique, si disponible |
+| `public_dns` | Nom DNS public, si disponible |
+| `instance_id` | Identifiant EC2 |
+| `ec2_private_ip` | IPv4 privée |
+| `ssh_command` | Commande SSH publique indicative, ou `null` sans IPv4 publique |
+
+Les sorties du module enfant doivent être relayées dans la configuration racine pour être consultées directement avec `terraform output`.
+
+### Paire de clés confirmée
+
+La commande AWS CLI a confirmé l'existence de la paire RSA `terraformcloud` dans la région Paris (`eu-west-3`).
+
+La clé privée utilisée doit être celle téléchargée lors de cette création à Paris. L'ancien fichier correspondant à une paire créée à Stockholm ne permet pas de s'authentifier avec cette nouvelle paire.
+
+Le nom AWS `key_name` et le chemin local `private_key_path` ont des rôles distincts. Le module proposé ne lit pas le fichier privé et ne l'envoie pas à AWS. Il ne crée pas la paire de clés.
+
+### Exemple d'appel pour un laboratoire avec SSH direct
+
+Après déclaration des modules VPC et Security dans la configuration racine :
+
+```hcl
+variable "ec2_ami" {
+  type        = string
+  description = "AMI Ubuntu compatible disponible dans eu-west-3."
+}
+
+module "ec2" {
+  source = "./modules/ec2"
+
+  project_name = "rendezvous-pki"
+  env          = "dev"
+
+  ami           = var.ec2_ami
+  instance_type = "t2.micro"
+
+  subnet_id          = module.vpc.public_subnet_ids[0]
+  security_group_ids = [module.security.aws_sg_id]
+
+  key_name         = "terraformcloud"
+  private_key_path = "./key/terraformcloud.pem"
+  ssh_user         = "ubuntu"
+}
+```
+
+Cet exemple n'est pas une configuration racine complète. L'AMI réelle et le fournisseur AWS restent à configurer.
+
+### Conditions pour SSH
+
+- Le poste doit pouvoir joindre l'instance sur TCP 22.
+- Pour un accès direct depuis Internet, l'instance doit disposer d'une adresse publique et d'une route via l'Internet Gateway.
+- Le module EC2 proposé n'impose pas d'IPv4 publique : son attribution dépend du sous-réseau. Le module VPC active cette attribution dans ses sous-réseaux publics.
+- Le module Security désactive SSH par défaut avec `allowed_ssh_cidr = []`. Autoriser explicitement l'IPv4 publique réelle du poste en `/32` dans l'appel de ce module si nécessaire.
+- Les ACL réseau et le service SSH doivent permettre la connexion.
+- La clé privée doit correspondre à la paire AWS et avoir des permissions Windows acceptées par OpenSSH.
+- Le chemin relatif de la clé doit être valide depuis le dossier où la commande SSH est exécutée.
+
+Une instance privée nécessite un accès d'administration adapté, par exemple un bastion, un VPN ou Session Manager configuré. Une NAT Gateway ne fournit pas d'accès SSH entrant depuis Internet.
+
+### Limites
+
+Le module n'installe ni Docker, ni Nginx, ni l'application. La configuration sera traitée avec Ansible. Aucun ALB, rôle IAM d'instance, Elastic IP ou certificat n'est créé par ce module.
+
+La création du groupe ALB dans le module Security ne crée pas le load balancer lui-même. Le futur trafic applicatif reste prévu via l'ALB ; l'exemple EC2 public concerne l'administration du laboratoire.
+
 ## Prérequis
 
 - Terraform installé.
@@ -373,6 +472,9 @@ terraform -chdir=modules/security validate
 
 terraform -chdir=modules/rds init -backend=false
 terraform -chdir=modules/rds validate
+
+terraform -chdir=modules/ec2 init -backend=false
+terraform -chdir=modules/ec2 validate
 ```
 
 Cette initialisation prépare les dépendances nécessaires à la validation sans initialiser un backend distant.
@@ -390,6 +492,36 @@ aws rds describe-db-engine-versions --engine mysql --region eu-west-3 --profile 
 Après sélection d'une version exacte, vérifier la classe `db.t3.micro` avec `aws rds describe-orderable-db-instance-options` pour cette version et la région. Ne pas supposer que la famille `8.0` est le meilleur choix : examiner son support, les coûts et la compatibilité applicative. Tout changement de version majeure doit rester cohérent avec le groupe de paramètres.
 
 Ces vérifications nécessitent des permissions de lecture RDS ; une erreur `AccessDenied` devra être résolue avant de poursuivre.
+
+### Vérifications EC2 et SSH
+
+Vérifier la paire de clés dans la région cible :
+
+```powershell
+aws ec2 describe-key-pairs --key-names terraformcloud --region eu-west-3 --profile terraform
+```
+
+Cette vérification a réussi pour `terraformcloud` à Paris. Elle ne valide ni le fichier privé local ni une connexion SSH.
+
+Avant déploiement, confirmer l'AMI, son architecture et sa compatibilité avec le type d'instance.
+
+Vérifier l'exclusion du dossier local de clés :
+
+```powershell
+git check-ignore -v key/terraformcloud.pem
+git ls-files key/
+```
+
+La seconde commande ne doit afficher aucun fichier. Si elle en affiche, retirer le dossier du suivi avec `git rm -r --cached -- key/`, sans supprimer les fichiers locaux. Une clé privée déjà publiée doit être remplacée ; `.gitignore` ne nettoie pas l'historique.
+
+Si la session AWS expire, renouveler la connexion :
+
+```powershell
+aws login --profile moustapha-login --region eu-west-3
+aws sts get-caller-identity --profile terraform
+```
+
+Sélectionner l'utilisateur IAM prévu pour le projet, et non la session root.
 
 ### Plan de déploiement
 
@@ -447,6 +579,19 @@ Les corrections et ajustements proposés sont :
 
 Si une instance existe déjà, examiner le plan avant ces modifications : les changements de nom, de base initiale ou de chiffrement peuvent nécessiter un remplacement. Les sauvegardes doivent être préparées avant toute modification destructive.
 
+### Revue du module EC2
+
+Les corrections et ajouts proposés sont :
+
+- remplacer `security_groups` par `vpc_security_group_ids` ;
+- distinguer le nom de la paire AWS du chemin du fichier privé local ;
+- rendre l'utilisateur SSH et le chemin de clé paramétrables ;
+- ajouter la sortie IPv4 privée ;
+- ne pas afficher de commande SSH publique exploitable lorsque l'instance n'a pas d'IPv4 publique ;
+- documenter les prérequis réseau et l'exclusion du dossier `key/`.
+
+L'existence de la paire de clés à Paris est confirmée. La disponibilité de l'AMI, les permissions du fichier privé, la validation Terraform et la connexion SSH restent à vérifier.
+
 ## Coûts et données sensibles
 
 ### Coûts AWS
@@ -474,7 +619,7 @@ Ne pas publier :
 - les mots de passe ;
 - les PIN SoftHSM ;
 - les fichiers de tokens SoftHSM ;
-- les clés privées ;
+- les clés privées, notamment les fichiers du dossier local `key/` ;
 - les sauvegardes de bases de données contenant des informations sensibles.
 
 Le `.gitignore` constitue une aide, mais ne remplace pas une revue des fichiers avant chaque commit. Il ne retire pas automatiquement les fichiers déjà suivis par Git.
@@ -505,11 +650,19 @@ Les certificats publics et les chaînes de confiance ne sont pas des clés priv�
 - [ ] Vérifier la version MySQL, son support et la classe disponible dans la région.
 - [ ] Vérifier les permissions AWS nécessaires à RDS.
 - [ ] Définir la gestion du secret administrateur et du compte applicatif.
-- [ ] Ajouter une configuration racine de développement appelant VPC, Security et RDS.
+- [x] Examiner le code initial du module EC2.
+- [x] Proposer les corrections, les commentaires et la documentation EC2.
+- [x] Créer et vérifier la paire RSA `terraformcloud` à Paris.
+- [ ] Vérifier l'exclusion de `key/` et l'absence de clés privées suivies dans Git.
+- [ ] Vérifier le nouveau fichier privé local et ses permissions Windows.
+- [ ] Confirmer l'AMI, son architecture et le type d'instance.
+- [ ] Appliquer et valider le module EC2 corrigé.
+- [ ] Ajouter une configuration racine de développement appelant VPC, Security, RDS et EC2.
 - [ ] Déployer RDS et tester la connexion depuis le serveur applicatif.
 - [ ] Examiner le plan et les coûts.
 - [ ] Déployer et vérifier le réseau.
-- [ ] Ajouter les ressources de calcul nécessaires à l'application.
+- [ ] Déployer EC2 et vérifier la connexion SSH.
+- [ ] Définir le déploiement du futur ALB et ses contrôles de santé.
 - [ ] Ajouter les contrôles Terraform dans GitHub Actions.
 - [ ] Configurer l'accès AWS OIDC et la gestion de l'état distant avant les déploiements CI.
 - [ ] Configurer les serveurs avec Ansible.
@@ -522,6 +675,8 @@ Les certificats publics et les chaînes de confiance ne sont pas des clés priv�
 
 ## Références
 
+- [Instance EC2 avec Terraform](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/instance)
+- [Paires de clés EC2](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-key-pairs.html)
 - [Instance RDS avec Terraform](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/db_instance)
 - [Groupe de sous-réseaux RDS avec Terraform](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/db_subnet_group)
 - [RDS dans un VPC](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_VPC.WorkingWithRDSInstanceinaVPC.html)
