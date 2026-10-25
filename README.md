@@ -4,17 +4,17 @@ Projet pédagogique de Moustapha associant une application Spring Boot / Angular
 
 ## État du projet
 
-Le projet commence par la construction de modules Terraform pour le réseau AWS. L'application et la PKI sont développées séparément et seront intégrées progressivement.
+Le projet commence par la construction de modules Terraform pour le réseau et les groupes de sécurité AWS. L'application et la PKI sont développées séparément et seront intégrées progressivement.
 
 Aucun déploiement AWS ni résultat de validation Terraform n'est confirmé à ce stade.
 
 | Composant | État |
 |---|---|
 | Module VPC Terraform | Code commenté ; zones et route NAT corrigées ; validation à effectuer |
-| Module security | Dossier créé ; contenu et rôle à documenter |
+| Module Security | Code revu ; version corrigée et commentée proposée ; application locale et validation à confirmer |
 | Application de gestion de rendez-vous | Développement commencé ; intégration au dépôt à effectuer |
 | EJBCA / SoftHSM / Docker | Travail existant séparé ; partie révocation en cours |
-| Module racine appelant le VPC | À ajouter |
+| Configuration racine appelant les modules VPC et Security | À ajouter |
 | Infrastructure EC2 | Prévue |
 | Configuration et déploiement Ansible | Prévus |
 | Workflows GitHub Actions | Prévus |
@@ -62,7 +62,10 @@ SoftHSM est une implémentation logicielle utilisée pour l'apprentissage et les
 | `modules/vpc/variables.tf` | Paramètres d'entrée du module VPC |
 | `modules/vpc/outputs.tf` | Valeurs exposées par le module VPC |
 | `modules/vpc/README.md` | Documentation du module VPC |
-| `modules/security/` | Dossier créé ; contenu à examiner et documenter |
+| `modules/security/main.tf` | Groupes et règles de sécurité ALB, Web et RDS |
+| `modules/security/variable.tf` ou `variables.tf` | Paramètres du module Security ; conserver un seul de ces fichiers |
+| `modules/security/outputs.tf` | Identifiants des groupes de sécurité |
+| `modules/security/README.md` | Documentation proposée du module Security |
 
 Les répertoires de l'application, de la PKI, d'Ansible et des workflows seront ajoutés lors de leur intégration.
 
@@ -136,6 +139,82 @@ Ces sorties permettront aux autres modules de référencer le réseau créé.
 
 Cette topologie est destinée à un laboratoire et ne constitue pas à elle seule une architecture de production hautement disponible.
 
+## Module Security
+
+### Fonction et état
+
+Le module Security est destiné à créer trois groupes de sécurité dans le VPC : ALB, Web et RDS. Il ne crée pas le load balancer, les instances EC2 ni la base RDS.
+
+Le code initial a été examiné. Une version corrigée et commentée a été proposée ; son application dans les fichiers locaux et sa validation restent à confirmer. Les tableaux ci-dessous décrivent cette version proposée.
+
+### Règles entrantes proposées
+
+| Destination | Source | Protocole | Port |
+|---|---|---|---|
+| ALB | Toutes les adresses IPv4 | TCP | 80 |
+| ALB | Toutes les adresses IPv4 | TCP | 443 |
+| Web | Groupe ALB | TCP | 80 |
+| Web | Plages définies dans `allowed_ssh_cidr` | TCP | 22 |
+| RDS | Groupe Web | TCP | 3306 |
+
+La valeur par défaut proposée pour `allowed_ssh_cidr` est `[]` : aucune règle SSH n'est créée. Un accès SSH éventuel nécessite également un chemin réseau vers le serveur.
+
+### Règles sortantes proposées
+
+| Source | Destination | Trafic |
+|---|---|---|
+| ALB | Groupe Web | TCP 80 |
+| Web | Toutes les destinations IPv4 | Tous les protocoles |
+| RDS | Toutes les destinations IPv4 | Tous les protocoles |
+
+Les groupes de sécurité sont stateful : les réponses à une communication autorisée n'exigent pas une règle inverse dédiée.
+
+### Entrées et sorties
+
+| Entrée | Description | Défaut proposé |
+|---|---|---|
+| `env` | Environnement utilisé dans les noms | `dev` |
+| `project_name` | Nom du projet | `moustapha` |
+| `vpc_id` | Identifiant du VPC | Obligatoire |
+| `allowed_ssh_cidr` | Liste des plages IPv4 autorisées pour SSH | `[]` |
+
+| Sortie | Description |
+|---|---|
+| `aws_sg_id` | Identifiant du groupe Web |
+| `rds_sg_id` | Identifiant du groupe RDS |
+| `alb_sg_id` | Identifiant du groupe ALB |
+
+La sortie Web doit utiliser `aws_security_group.web.id` pour retourner uniquement l'identifiant du groupe.
+
+### Liaison prévue avec le module VPC
+
+Dans la future configuration racine, après déclaration du module `vpc` :
+
+```hcl
+module "security" {
+  source = "./modules/security"
+
+  project_name     = "rendezvous-pki"
+  env              = "dev"
+  vpc_id           = module.vpc.vpc_id
+  allowed_ssh_cidr = []
+}
+```
+
+La référence `module.vpc.vpc_id` transmet l'identifiant du VPC et crée une dépendance implicite. Le fournisseur AWS doit aussi être déclaré et configuré dans la configuration racine.
+
+### Hypothèses et limites
+
+- Le service Web est supposé écouter sur le port 80, par exemple derrière Nginx. Si Spring Boot est exposé directement sur 8080, les règles devront être adaptées.
+- Les contrôles de santé de l'ALB sont supposés utiliser le port 80 ; un autre port nécessitera une adaptation.
+- La base est supposée utiliser MySQL sur le port 3306. Le moteur réel de l'application reste à confirmer ; PostgreSQL utilise habituellement le port 5432.
+- Ouvrir le port 443 ne configure ni listener HTTPS ni certificat.
+- La communication ALB vers Web utilise HTTP dans cette proposition. Le chiffrement interne et le mTLS seront traités lors de l'intégration PKI.
+- Aucune règle spécifique à EJBCA, aux CRL ou à OCSP n'est encore définie.
+- Les règles sont IPv4 uniquement.
+- Les groupes doivent être associés aux futures ressources pour agir sur leurs communications. D'autres groupes associés peuvent accorder des accès supplémentaires.
+- La version corrigée utilise uniquement des ressources `aws_vpc_security_group_ingress_rule` et `aws_vpc_security_group_egress_rule`. Ne pas les mélanger avec des règles intégrées aux mêmes groupes ni avec `aws_security_group_rule`.
+
 ## Prérequis
 
 - Terraform installé.
@@ -187,13 +266,16 @@ aws ec2 describe-availability-zones --region eu-west-3 --profile terraform --que
 
 Vérifier que les zones configurées dans le module sont disponibles pour le compte.
 
-### Validation du module
+### Validation des modules
 
-Après ajout des exigences de fournisseur au module :
+Après ajout des exigences de fournisseur à chaque module :
 
 ```powershell
 terraform -chdir=modules/vpc init -backend=false
 terraform -chdir=modules/vpc validate
+
+terraform -chdir=modules/security init -backend=false
+terraform -chdir=modules/security validate
 ```
 
 Cette initialisation prépare les dépendances nécessaires à la validation sans initialiser un backend distant.
@@ -225,7 +307,21 @@ Aucun déploiement ne doit être considéré comme réalisé avant confirmation 
 - Exécuter le formatage et la validation Terraform.
 - Ajouter la configuration racine.
 - Examiner le plan et les coûts avant tout déploiement.
-- Examiner et documenter le contenu du dossier `modules/security/`.
+- Appliquer et vérifier la version corrigée proposée du module Security.
+- Confirmer le moteur de base de données et les ports de l'application et des contrôles de santé.
+- Vérifier les associations des groupes aux futures ressources et tester les flux autorisés et interdits.
+
+### Revue du module Security
+
+Les corrections proposées sont :
+
+- retourner `aws_security_group.web.id` dans la sortie `aws_sg_id` ;
+- remplacer le mélange de règles intégrées et séparées par des ressources de règles séparées ;
+- limiter le trafic HTTP entrant sur Web au groupe ALB ;
+- autoriser les connexions sortantes de l'ALB vers Web sur le port 80 ;
+- désactiver SSH par défaut et n'autoriser que les plages explicitement fournies.
+
+Ces modifications changent les règles réseau du code initial. Si une ancienne version a déjà été déployée, examiner les suppressions et créations proposées par le plan avant application.
 
 ## Coûts et données sensibles
 
@@ -269,7 +365,12 @@ Les certificats publics et les chaînes de confiance ne sont pas des clés priv�
 - [x] Écrire et commenter le module VPC.
 - [x] Corriger les zones par défaut et la cible de la route NAT.
 - [ ] Valider le module VPC.
-- [ ] Examiner et documenter le module security.
+- [x] Examiner le code initial du module Security.
+- [x] Proposer les corrections, les commentaires et la documentation du module Security.
+- [ ] Appliquer et vérifier les fichiers corrigés du module Security.
+- [ ] Valider le module Security.
+- [ ] Confirmer les ports applicatifs et le moteur de base de données.
+- [ ] Associer les groupes aux ressources et tester les communications après déploiement.
 - [ ] Ajouter une configuration racine de développement.
 - [ ] Examiner le plan et les coûts.
 - [ ] Déployer et vérifier le réseau.
@@ -288,6 +389,8 @@ Les certificats publics et les chaînes de confiance ne sont pas des clés priv�
 
 - [Documentation Terraform](https://developer.hashicorp.com/terraform/docs)
 - [Ressource Terraform AWS Route Table](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/route_table)
+- [Groupes de sécurité Terraform AWS](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/security_group)
+- [Groupes de sécurité des ALB](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/load-balancer-update-security-groups.html)
 - [Régions AWS](https://docs.aws.amazon.com/global-infrastructure/latest/regions/aws-regions.html)
 
 ## Licence
