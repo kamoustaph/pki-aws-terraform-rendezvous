@@ -1,0 +1,37 @@
+# Terraform : garder .terraform.lock.hcl versionné
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.plan
+tfplan
+.terraform.tfstate.lock.info
+crash.log
+crash.*.log
+*.tfvars
+*.tfvars.json
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# Secrets et données locales
+.env
+.env.*
+!.env.example
+.aws/
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+secrets/
+backups/
+softhsm-tokens/
+
+# Fichiers système
+.DS_Store
+Thumbs.db
