@@ -4,7 +4,7 @@ Projet pédagogique de Moustapha associant une application Spring Boot / Angular
 
 ## État du projet
 
-Le projet commence par la construction de modules Terraform pour le réseau et les groupes de sécurité AWS. L'application et la PKI sont développées séparément et seront intégrées progressivement.
+Le projet commence par la construction de modules Terraform pour le réseau, les groupes de sécurité et une base de données RDS MySQL sur AWS. L'application et la PKI sont développées séparément et seront intégrées progressivement.
 
 Aucun déploiement AWS ni résultat de validation Terraform n'est confirmé à ce stade.
 
@@ -12,9 +12,10 @@ Aucun déploiement AWS ni résultat de validation Terraform n'est confirmé à c
 |---|---|
 | Module VPC Terraform | Code commenté ; zones et route NAT corrigées ; validation à effectuer |
 | Module Security | Code revu ; version corrigée et commentée proposée ; application locale et validation à confirmer |
+| Module RDS MySQL | Code initial examiné ; version corrigée et commentée proposée ; application locale et validation à confirmer |
 | Application de gestion de rendez-vous | Développement commencé ; intégration au dépôt à effectuer |
 | EJBCA / SoftHSM / Docker | Travail existant séparé ; partie révocation en cours |
-| Configuration racine appelant les modules VPC et Security | À ajouter |
+| Configuration racine appelant les modules VPC, Security et RDS | À ajouter |
 | Infrastructure EC2 | Prévue |
 | Configuration et déploiement Ansible | Prévus |
 | Workflows GitHub Actions | Prévus |
@@ -66,6 +67,10 @@ SoftHSM est une implémentation logicielle utilisée pour l'apprentissage et les
 | `modules/security/variable.tf` ou `variables.tf` | Paramètres du module Security ; conserver un seul de ces fichiers |
 | `modules/security/outputs.tf` | Identifiants des groupes de sécurité |
 | `modules/security/README.md` | Documentation proposée du module Security |
+| `modules/rds/main.tf` | Groupe de sous-réseaux et instance RDS MySQL proposés |
+| `modules/rds/variables.tf` | Paramètres du module RDS |
+| `modules/rds/outputs.tf` | Identifiant et informations de connexion RDS |
+| `modules/rds/README.md` | Documentation proposée du module RDS |
 
 Les répertoires de l'application, de la PKI, d'Ansible et des workflows seront ajoutés lors de leur intégration.
 
@@ -215,6 +220,95 @@ La référence `module.vpc.vpc_id` transmet l'identifiant du VPC et crée une d�
 - Les groupes doivent être associés aux futures ressources pour agir sur leurs communications. D'autres groupes associés peuvent accorder des accès supplémentaires.
 - La version corrigée utilise uniquement des ressources `aws_vpc_security_group_ingress_rule` et `aws_vpc_security_group_egress_rule`. Ne pas les mélanger avec des règles intégrées aux mêmes groupes ni avec `aws_security_group_rule`.
 
+## Module RDS MySQL
+
+### Fonction et état
+
+Le module RDS est destiné à créer un groupe de sous-réseaux et une instance MySQL pour l'application de gestion de rendez-vous. Il réutilise les sous-réseaux privés du module VPC et le groupe RDS du module Security.
+
+Le code initial a été examiné. Les paramètres suivants décrivent la version corrigée proposée ; leur application locale, la validation et le déploiement restent à confirmer.
+
+### Configuration proposée
+
+| Paramètre | Valeur |
+|---|---|
+| Moteur et famille de version | MySQL `8.0`, disponibilité et support à vérifier |
+| Groupe de paramètres | `default.mysql8.0` |
+| Classe d'instance | `db.t3.micro`, compatibilité régionale à vérifier |
+| Stockage initial | 20 Gio, `gp3` |
+| Chiffrement du stockage | Activé |
+| Accès public | Désactivé |
+| Multi-AZ | Désactivé |
+| Sauvegardes automatisées | Désactivées : rétention de 0 jour |
+| Protection contre la suppression | Désactivée |
+| Snapshot final | Désactivé |
+
+Cette configuration est réservée à un laboratoire avec des données jetables. Elle n'offre ni instance de secours Multi-AZ, ni sauvegarde automatisée, ni snapshot final. La version moteur et son éventuel support étendu doivent être examinés avant le déploiement.
+
+Le chiffrement du stockage ne configure pas à lui seul TLS sur les connexions MySQL. Aucune intégration entre RDS et la PKI EJBCA n'est réalisée ici.
+
+### Entrées et sorties
+
+| Entrée | Description | Défaut proposé |
+|---|---|---|
+| `env` | Environnement | `dev` |
+| `project_name` | Nom du projet | `moustapha` |
+| `security_group_id` | Identifiant du groupe de sécurité RDS | Obligatoire |
+| `subnet_ids` | Liste des sous-réseaux privés | Obligatoire |
+| `db_name` | Nom de la base MySQL initiale | `moustaphadb` |
+| `db_username` | Compte administrateur initial | `admin` |
+| `db_password` | Mot de passe administrateur sensible | Obligatoire, sans valeur par défaut |
+
+La variable `vpc_id`, inutilisée dans le code initial, est retirée de la version proposée. Le VPC est déterminé par les sous-réseaux fournis. Le groupe de sécurité doit appartenir à ce même VPC.
+
+| Sortie | Description |
+|---|---|
+| `rds_endpoint` | Nom DNS et port au format `adresse:port` |
+| `rds_instance_id` | Identifiant de l'instance RDS |
+| `rds_address` | Nom DNS sans port |
+| `rds_port` | Port MySQL |
+
+### Liaison prévue avec VPC et Security
+
+Dans la future configuration racine, après déclaration des modules `vpc` et `security` :
+
+```hcl
+variable "db_password" {
+  type        = string
+  description = "Mot de passe administrateur RDS."
+  sensitive   = true
+}
+
+module "rds" {
+  source = "./modules/rds"
+
+  project_name = "rendezvous-pki"
+  env          = "dev"
+
+  subnet_ids        = module.vpc.private_subnet_ids
+  security_group_id = module.security.rds_sg_id
+
+  db_name     = "rendezvousdb"
+  db_username = "admin"
+  db_password = var.db_password
+}
+```
+
+Cet exemple n'est pas une configuration racine complète. La variable racine `db_password` doit être déclarée une seule fois et sa valeur fournie hors du code versionné.
+
+### Prérequis et limites
+
+- Les sous-réseaux doivent appartenir au même VPC et couvrir au moins deux zones, même si `multi_az` vaut `false`.
+- La validation proposée vérifie le nombre de sous-réseaux distincts, pas leurs zones ni leur VPC.
+- Le groupe RDS doit autoriser TCP 3306 depuis les ressources applicatives.
+- L'application doit disposer d'un chemin réseau privé vers la base. Une connexion directe depuis le poste local n'est pas fournie par ce module.
+- La compatibilité de l'application existante avec MySQL reste à confirmer.
+- Le compte administrateur doit être complété par un compte applicatif aux permissions limitées.
+- Ce module ne crée ni les tables métier, ni les migrations, ni les données de l'application.
+- Les noms de projet et d'environnement doivent être compatibles avec les contraintes de nommage RDS.
+- `sensitive = true` masque l'affichage courant du mot de passe ; avec l'argument `password`, celui-ci reste enregistré dans l'état Terraform.
+- Les politiques EC2 et S3 seules ne donnent pas les permissions de création RDS. Les droits RDS et les éventuelles dépendances IAM/KMS doivent être vérifiés.
+
 ## Prérequis
 
 - Terraform installé.
@@ -276,11 +370,26 @@ terraform -chdir=modules/vpc validate
 
 terraform -chdir=modules/security init -backend=false
 terraform -chdir=modules/security validate
+
+terraform -chdir=modules/rds init -backend=false
+terraform -chdir=modules/rds validate
 ```
 
 Cette initialisation prépare les dépendances nécessaires à la validation sans initialiser un backend distant.
 
 La validation ne garantit ni les permissions AWS, ni la disponibilité effective des ressources, ni la réussite d'un déploiement.
+
+### Vérifications RDS avant le plan
+
+Lister les versions MySQL proposées dans la région :
+
+```powershell
+aws rds describe-db-engine-versions --engine mysql --region eu-west-3 --profile terraform --query "DBEngineVersions[].{Version:EngineVersion,Famille:DBParameterGroupFamily}" --output table
+```
+
+Après sélection d'une version exacte, vérifier la classe `db.t3.micro` avec `aws rds describe-orderable-db-instance-options` pour cette version et la région. Ne pas supposer que la famille `8.0` est le meilleur choix : examiner son support, les coûts et la compatibilité applicative. Tout changement de version majeure doit rester cohérent avec le groupe de paramètres.
+
+Ces vérifications nécessitent des permissions de lecture RDS ; une erreur `AccessDenied` devra être résolue avant de poursuivre.
 
 ### Plan de déploiement
 
@@ -323,6 +432,21 @@ Les corrections proposées sont :
 
 Ces modifications changent les règles réseau du code initial. Si une ancienne version a déjà été déployée, examiner les suppressions et créations proposées par le plan avant application.
 
+### Revue du module RDS
+
+Les corrections et ajustements proposés sont :
+
+- utiliser le type `aws_db_subnet_group` et corriger sa référence ;
+- référencer `aws_db_instance.main` dans les sorties ;
+- remplacer le nom initial `moustapha_db` par `moustaphadb` ;
+- retirer le mot de passe par défaut et la variable `vpc_id` inutilisée ;
+- différencier les noms des ressources par projet et environnement ;
+- déclarer le stockage `gp3` et activer son chiffrement ;
+- ajouter les sorties DNS et port séparés ;
+- documenter les limites des sauvegardes et de la suppression.
+
+Si une instance existe déjà, examiner le plan avant ces modifications : les changements de nom, de base initiale ou de chiffrement peuvent nécessiter un remplacement. Les sauvegardes doivent être préparées avant toute modification destructive.
+
 ## Coûts et données sensibles
 
 ### Coûts AWS
@@ -333,6 +457,7 @@ Le déploiement peut entraîner des frais, notamment pour :
 - l'adresse IPv4 publique ;
 - le traitement et le transfert des données ;
 - les futures instances EC2 ;
+- l’instance RDS, son stockage et les éventuels frais de support étendu du moteur ;
 - les volumes et services de stockage.
 
 Examiner les tarifs AWS et le plan Terraform avant tout `terraform apply`.
@@ -354,6 +479,8 @@ Ne pas publier :
 
 Le `.gitignore` constitue une aide, mais ne remplace pas une revue des fichiers avant chaque commit. Il ne retire pas automatiquement les fichiers déjà suivis par Git.
 
+Le mot de passe RDS ne doit pas être écrit dans le code ni dans un fichier suivi par Git. Avec la configuration proposée, il reste présent dans l’état Terraform malgré son marquage sensible. Un stockage d’état protégé est nécessaire.
+
 Le fichier `.terraform.lock.hcl` doit être versionné lorsqu'il est généré pour une configuration racine.
 
 Les certificats publics et les chaînes de confiance ne sont pas des clés privées. Leur publication éventuelle doit néanmoins être intentionnelle.
@@ -371,7 +498,15 @@ Les certificats publics et les chaînes de confiance ne sont pas des clés priv�
 - [ ] Valider le module Security.
 - [ ] Confirmer les ports applicatifs et le moteur de base de données.
 - [ ] Associer les groupes aux ressources et tester les communications après déploiement.
-- [ ] Ajouter une configuration racine de développement.
+- [x] Examiner le code initial du module RDS.
+- [x] Proposer les corrections, les commentaires et la documentation RDS.
+- [ ] Appliquer et vérifier les fichiers corrigés du module RDS.
+- [ ] Valider le module RDS.
+- [ ] Vérifier la version MySQL, son support et la classe disponible dans la région.
+- [ ] Vérifier les permissions AWS nécessaires à RDS.
+- [ ] Définir la gestion du secret administrateur et du compte applicatif.
+- [ ] Ajouter une configuration racine de développement appelant VPC, Security et RDS.
+- [ ] Déployer RDS et tester la connexion depuis le serveur applicatif.
 - [ ] Examiner le plan et les coûts.
 - [ ] Déployer et vérifier le réseau.
 - [ ] Ajouter les ressources de calcul nécessaires à l'application.
@@ -387,6 +522,10 @@ Les certificats publics et les chaînes de confiance ne sont pas des clés priv�
 
 ## Références
 
+- [Instance RDS avec Terraform](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/db_instance)
+- [Groupe de sous-réseaux RDS avec Terraform](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/db_subnet_group)
+- [RDS dans un VPC](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_VPC.WorkingWithRDSInstanceinaVPC.html)
+- [Versions RDS MySQL](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/MySQL.Concepts.VersionMgmt.html)
 - [Documentation Terraform](https://developer.hashicorp.com/terraform/docs)
 - [Ressource Terraform AWS Route Table](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/route_table)
 - [Groupes de sécurité Terraform AWS](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/security_group)
