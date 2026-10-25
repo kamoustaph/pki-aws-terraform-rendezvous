@@ -4,7 +4,7 @@ Projet pédagogique de Moustapha associant une application Spring Boot / Angular
 
 ## État du projet
 
-Le projet commence par la construction de modules Terraform pour le réseau, les groupes de sécurité, une base RDS MySQL et une instance EC2 sur AWS. L'application et la PKI sont développées séparément et seront intégrées progressivement.
+Le projet commence par la construction de modules Terraform pour le réseau, les groupes de sécurité, une base RDS MySQL, une instance EC2 et un Application Load Balancer sur AWS. L'application et la PKI sont développées séparément et seront intégrées progressivement.
 
 Aucun déploiement des modules Terraform ni résultat de validation Terraform n'est confirmé à ce stade. Une paire de clés SSH a été créée manuellement et son existence a été vérifiée à Paris (`eu-west-3`).
 
@@ -15,8 +15,9 @@ Aucun déploiement des modules Terraform ni résultat de validation Terraform n'
 | Module RDS MySQL | Code initial examiné ; version corrigée et commentée proposée ; application locale et validation à confirmer |
 | Application de gestion de rendez-vous | Développement commencé ; intégration au dépôt à effectuer |
 | EJBCA / SoftHSM / Docker | Travail existant séparé ; partie révocation en cours |
-| Configuration racine appelant les modules VPC, Security, RDS et EC2 | À ajouter |
+| Configuration racine appelant les modules VPC, Security, RDS, EC2 et ALB | À ajouter |
 | Module EC2 | Code initial examiné ; corrections et documentation proposées ; application locale et validation à confirmer |
+| Module ALB | Code initial examiné ; version corrigée et commentée proposée ; application locale, validation et tests HTTP à confirmer |
 | Paire de clés SSH EC2 | `terraformcloud` créée et vérifiée à Paris ; connexion SSH non testée |
 | Configuration et déploiement Ansible | Prévus |
 | Workflows GitHub Actions | Prévus |
@@ -76,6 +77,10 @@ SoftHSM est une implémentation logicielle utilisée pour l'apprentissage et les
 | `modules/ec2/variables.tf` | Paramètres de l'instance et de la commande SSH |
 | `modules/ec2/outputs.tf` | Identifiant, adresses et commande SSH indicative |
 | `modules/ec2/README.md` | Documentation proposée du module EC2 |
+| `modules/alb/main.tf` | ALB public, groupe cible, enregistrements et listener HTTP |
+| `modules/alb/variables.tf` | Paramètres du module ALB |
+| `modules/alb/outputs.tf` | DNS, URL et identifiants ALB |
+| `modules/alb/README.md` | Documentation proposée du module ALB |
 
 Le dossier local `key/` contient les clés SSH et doit être exclu du dépôt avec `/key/` dans `.gitignore`. Il ne fait pas partie des fichiers à publier.
 
@@ -408,6 +413,105 @@ Le module n'installe ni Docker, ni Nginx, ni l'application. La configuration ser
 
 La création du groupe ALB dans le module Security ne crée pas le load balancer lui-même. Le futur trafic applicatif reste prévu via l'ALB ; l'exemple EC2 public concerne l'administration du laboratoire.
 
+## Module ALB
+
+### Fonction et état
+
+Le module ALB décrit un Application Load Balancer public, un groupe cible d'instances EC2, leurs enregistrements et un listener HTTP sur le port 80.
+
+Le code initial a été examiné. Une version corrigée et commentée utilisant les ressources `aws_lb`, `aws_lb_target_group`, `aws_lb_target_group_attachment` et `aws_lb_listener` a été proposée. Son application locale, sa validation, son déploiement et les tests HTTP restent à confirmer.
+
+### Entrées
+
+| Entrée | Type | Défaut proposé | Description |
+|---|---|---|---|
+| `project_name` | `string` | `moustapha` | Nom du projet |
+| `env` | `string` | `dev` | Environnement |
+| `vpc_id` | `string` | Obligatoire | VPC du groupe cible |
+| `security_group_id` | `string` | Obligatoire | Groupe de sécurité ALB |
+| `instance_ids` | `list(string)` | Obligatoire | Instances EC2 à enregistrer |
+| `subnet_ids` | `list(string)` | Obligatoire | Sous-réseaux publics de l'ALB |
+
+Une liste vide d'instances est acceptée mais ne fournit aucune cible pour servir l'application. Le module utilise `count` pour les enregistrements : conserver un ordre stable dans `instance_ids`.
+
+### Configuration proposée
+
+| Paramètre | Valeur |
+|---|---|
+| Type | Application Load Balancer |
+| Exposition | Publique : `internal = false` |
+| Listener | HTTP, port 80 |
+| Protocole et port vers les instances | HTTP, port 80 |
+| Type de cible | `instance` |
+| Chemin du contrôle de santé | `/` |
+| Port du contrôle | Port du trafic : 80 |
+| Intervalle / timeout | 30 / 5 secondes |
+| Seuil de rétablissement / défaillance | 2 succès / 2 échecs consécutifs |
+| Codes HTTP acceptés | 200 à 299 |
+| Délai de drainage | 300 secondes |
+
+La page `/` doit être accessible sans authentification et retourner un code accepté. Une redirection 301/302 ou une réponse 401 échoue avec ce matcher. Un endpoint de santé dédié pourra être choisi selon l'application.
+
+Le seuil de rétablissement concerne une cible précédemment défaillante. À l'enregistrement initial, AWS peut déclarer une cible saine après un premier contrôle réussi.
+
+### Sorties
+
+| Sortie | Description |
+|---|---|
+| `alb_dns` | Nom DNS du load balancer |
+| `url_alb` | URL HTTP exposée |
+| `zone_id` | Zone AWS de l'ALB utilisée comme cible Alias Route 53 |
+| `alb_arn` | ARN du load balancer |
+| `target_group_arn` | ARN du groupe cible |
+
+`zone_id` n'est pas l'identifiant de la zone DNS de ton propre domaine. Le module ne crée aucun enregistrement Route 53.
+
+### Liaison prévue avec les autres modules
+
+Dans la configuration racine, après déclaration de VPC, Security et EC2 :
+
+```hcl
+module "alb" {
+  source = "./modules/alb"
+
+  project_name = "rendezvous-pki"
+  env          = "dev"
+
+  vpc_id            = module.vpc.vpc_id
+  subnet_ids        = module.vpc.public_subnet_ids
+  security_group_id = module.security.alb_sg_id
+
+  instance_ids = [module.ec2.instance_id]
+}
+```
+
+Cet exemple n'est pas une configuration racine complète. Les références aux sorties établissent les dépendances implicites. Le fournisseur AWS reste à configurer.
+
+### Chemin des requêtes et prérequis
+
+1. Le visiteur contacte le DNS public de l'ALB sur le port 80.
+2. Le listener transmet la requête au groupe cible.
+3. L'ALB contacte l'instance sur son adresse privée et son port 80.
+4. Le service Web traite la requête et renvoie la réponse.
+
+Le module ALB doit recevoir des sous-réseaux publics dans au moins deux zones distinctes, avec un seul sous-réseau par zone sélectionnée. Pour cette architecture, prévoir des sous-réseaux de taille /27 ou supérieure et au moins huit adresses libres par sous-réseau. Les sous-réseaux publics doivent avoir une route vers l'Internet Gateway.
+
+Le groupe ALB doit autoriser les entrées TCP 80 et les sorties TCP 80 vers le groupe Web. Le groupe Web doit accepter TCP 80 depuis le groupe ALB. Les ACL réseau doivent également permettre les flux et leurs réponses.
+
+L'ALB public peut cibler une instance privée. Une IPv4 publique sur l'instance n'est pas nécessaire au trafic ALB vers Web. Le choix d'une instance publique dans l'exemple EC2 précédent concerne uniquement l'administration du laboratoire.
+
+### Limites et tests applicatifs
+
+- HTTP uniquement : aucun listener HTTPS, certificat, chiffrement ALB vers Web ni mTLS n'est configuré.
+- Ouvrir le port 443 dans le groupe Security ne crée pas de listener HTTPS.
+- Aucun service Web n'est installé par ce module ou le module EC2. Ansible devra installer/configurer le service, ou un serveur HTTP de test devra être préparé.
+- Si Spring Boot écoute directement sur 8080, adapter le groupe cible, les enregistrements et les règles réseau ensemble.
+- Une seule instance EC2 reste un point de panne unique ; deux zones pour l'ALB ne créent pas deux serveurs applicatifs.
+- Sans cible enregistrée, l'ALB peut retourner HTTP 503.
+- Si toutes les cibles enregistrées sont défaillantes, l'ALB peut leur envoyer le trafic malgré tout. Les health checks ne constituent pas un contrôle de sécurité.
+- Les noms de l'ALB et du groupe cible doivent respecter les contraintes AWS, notamment la limite de 32 caractères.
+- Aucune règle de routage par chemin ni politique Auto Scaling n'est ajoutée.
+
 ## Prérequis
 
 - Terraform installé.
@@ -475,6 +579,9 @@ terraform -chdir=modules/rds validate
 
 terraform -chdir=modules/ec2 init -backend=false
 terraform -chdir=modules/ec2 validate
+
+terraform -chdir=modules/alb init -backend=false
+terraform -chdir=modules/alb validate
 ```
 
 Cette initialisation prépare les dépendances nécessaires à la validation sans initialiser un backend distant.
@@ -522,6 +629,34 @@ aws sts get-caller-identity --profile terraform
 ```
 
 Sélectionner l'utilisateur IAM prévu pour le projet, et non la session root.
+
+### Vérifications ALB après déploiement
+
+Vérifier le listener HTTP, les instances enregistrées et leur état de santé depuis la console EC2, rubrique Groupes cibles. Le rôle ou l'utilisateur AWS doit disposer des permissions Elastic Load Balancing nécessaires.
+
+Pour consulter la santé des cibles en ligne de commande :
+
+```powershell
+# Remplacer cette valeur par l'ARN réel obtenu après déploiement.
+$targetGroupArn = "ARN_REEL_DU_GROUPE_CIBLE"
+aws elbv2 describe-target-health --target-group-arn $targetGroupArn --region eu-west-3 --profile terraform
+```
+
+Après exposition de l'URL par un output de la configuration racine :
+
+```hcl
+output "url_alb" {
+  description = "URL HTTP de l'application via ALB."
+  value       = module.alb.url_alb
+}
+```
+
+```powershell
+$albUrl = terraform output -raw url_alb
+Invoke-WebRequest -Uri $albUrl -UseBasicParsing
+```
+
+Ces tests s'effectuent après déploiement et installation du service HTTP. Aucun résultat de santé ou de test HTTP n'est confirmé pour le moment.
 
 ### Plan de déploiement
 
@@ -592,6 +727,20 @@ Les corrections et ajouts proposés sont :
 
 L'existence de la paire de clés à Paris est confirmée. La disponibilité de l'AMI, les permissions du fichier privé, la validation Terraform et la connexion SSH restent à vérifier.
 
+### Revue du module ALB
+
+Les corrections et clarifications proposées sont :
+
+- rendre les types de ressources et les références cohérents en utilisant `aws_lb` partout ;
+- corriger les descriptions copiées depuis le module RDS ;
+- demander les sous-réseaux publics pour cet ALB Internet ;
+- ajouter une validation du nombre de sous-réseaux distincts ;
+- expliciter le type de cible `instance` et les contrôles de santé ;
+- documenter les sorties DNS, URL, zone AWS et ARN ;
+- distinguer le déploiement de l'infrastructure de la disponibilité de l'application.
+
+Les noms `aws_alb` ne sont pas présentés ici comme une erreur en eux-mêmes : le problème du code initial était leur incohérence avec les sorties `aws_lb.main`. Si une ancienne version a déjà été appliquée, préparer et examiner la migration de l'état avant de changer les types de ressources. Ne pas supposer que le renommage sera sans effet sur le plan.
+
 ## Coûts et données sensibles
 
 ### Coûts AWS
@@ -599,6 +748,7 @@ L'existence de la paire de clés à Paris est confirmée. La disponibilité de l
 Le déploiement peut entraîner des frais, notamment pour :
 
 - la NAT Gateway ;
+- l’ALB, sa durée d’utilisation et sa capacité ;
 - l'adresse IPv4 publique ;
 - le traitement et le transfert des données ;
 - les futures instances EC2 ;
@@ -657,12 +807,19 @@ Les certificats publics et les chaînes de confiance ne sont pas des clés priv�
 - [ ] Vérifier le nouveau fichier privé local et ses permissions Windows.
 - [ ] Confirmer l'AMI, son architecture et le type d'instance.
 - [ ] Appliquer et valider le module EC2 corrigé.
-- [ ] Ajouter une configuration racine de développement appelant VPC, Security, RDS et EC2.
+- [x] Examiner le code initial du module ALB.
+- [x] Proposer les corrections, les commentaires et la documentation ALB.
+- [ ] Appliquer les corrections et valider le module ALB.
+- [ ] Relier ALB à VPC, Security et EC2 dans la configuration racine.
+- [ ] Ajouter une configuration racine de développement appelant VPC, Security, RDS, EC2 et ALB.
 - [ ] Déployer RDS et tester la connexion depuis le serveur applicatif.
 - [ ] Examiner le plan et les coûts.
 - [ ] Déployer et vérifier le réseau.
 - [ ] Déployer EC2 et vérifier la connexion SSH.
-- [ ] Définir le déploiement du futur ALB et ses contrôles de santé.
+- [ ] Déployer l'ALB et ses enregistrements de cibles.
+- [ ] Installer un service HTTP sur l'instance pour les tests.
+- [ ] Vérifier la santé des cibles et tester l'URL HTTP.
+- [ ] Ajouter HTTPS et définir l'architecture de chiffrement interne.
 - [ ] Ajouter les contrôles Terraform dans GitHub Actions.
 - [ ] Configurer l'accès AWS OIDC et la gestion de l'état distant avant les déploiements CI.
 - [ ] Configurer les serveurs avec Ansible.
@@ -675,6 +832,9 @@ Les certificats publics et les chaînes de confiance ne sont pas des clés priv�
 
 ## Références
 
+- [ALB avec Terraform](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/lb)
+- [Application Load Balancers](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/application-load-balancers.html)
+- [Contrôles de santé des cibles ALB](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/target-group-health-checks.html)
 - [Instance EC2 avec Terraform](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/instance)
 - [Paires de clés EC2](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-key-pairs.html)
 - [Instance RDS avec Terraform](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/db_instance)
