@@ -26,6 +26,8 @@ resource "aws_instance" "vm_instance" {
   # - les sous-réseaux publics activent l'attribution automatique ;
   # - les sous-réseaux privés ne l'activent pas.
 
+  user_data = var.user_data != "" ? var.user_data : null
+
   tags = {
     Name        = "ec2-${var.project_name}-${var.env}"
     Environment = var.env

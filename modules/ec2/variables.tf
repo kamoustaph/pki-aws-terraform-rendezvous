@@ -96,3 +96,9 @@ variable "project_name" {
   description = "Nom du projet."
   default     = "moustapha"
 }
+
+
+variable "user_data" {
+  type        = string
+  description = "Script d'initialisation de l'instance EC2."
+}
