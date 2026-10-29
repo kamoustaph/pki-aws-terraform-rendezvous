@@ -65,7 +65,7 @@ jobs:
         working-directory: environments/${{ matrix.environment }}
         run: |
           terraform plan \
-            -var="db_password=${{secrets.DB_PASSWORD}}"
+            -var="db_password=${{secrets.DB_PASSWORD}}"\
             -no-color
 
   terraform-apply:
