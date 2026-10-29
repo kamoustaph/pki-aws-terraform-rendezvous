@@ -38,6 +38,7 @@ jobs:
     if: github.event_name == 'pull_request'
 
     strategy:
+      fail-fast: false
       matrix:
         environment: [dev, staging, prod]
 

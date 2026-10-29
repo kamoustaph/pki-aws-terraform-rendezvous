@@ -35,7 +35,6 @@ provider "aws" {
   #
   # Cette configuration locale sera adaptée pour GitHub Actions,
   # où ce profil n'existe pas automatiquement.
-  profile = "terraform"
 }
 
 
