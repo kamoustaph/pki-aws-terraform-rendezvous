@@ -8,7 +8,7 @@ tfplan
 .terraform.tfstate.lock.info
 crash.log
 crash.*.log
-*.tfvars
+# *.tfvars
 *.tfvars.json
 override.tf
 override.tf.json
