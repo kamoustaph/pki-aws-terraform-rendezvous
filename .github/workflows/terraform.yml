@@ -8,9 +8,9 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: "Action Terraform"
+        description: 'Action terraform'
         required: true
-        default: plan
+        default: 'plan'
         type: choice
         options:
           - plan
@@ -18,137 +18,67 @@ on:
           - destroy
 
       environment:
-        description: "Environnement cible"
+        description: 'Environment cible  pour deployer'
         required: true
-        default: dev
+        default: 'dev'
         type: choice
         options:
           - dev
           - staging
           - prod
 
-permissions:
-  contents: read
-
 env:
-  TF_VERSION: "1.5.0"
+  TF_VERSION: 1.5.0
   AWS_REGION: eu-west-3
-  TF_IN_AUTOMATION: "true"
-  TF_INPUT: "false"
 
 jobs:
-  # Plans sur pull request et sur push.
   terraform-plan-pr:
     name: plan ${{ matrix.environment }}
-    runs-on: ubuntu-24.04
-    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
 
     strategy:
       fail-fast: false
       matrix:
         environment: [dev, staging, prod]
 
-    defaults:
-      run:
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Init
         working-directory: environments/${{ matrix.environment }}
-
-    env:
-      TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TF_VERSION }}
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Terraform Init
-        run: terraform init -input=false
-
-      - name: Terraform Validate
-        run: terraform validate -no-color
+        run: terraform init
 
       - name: Terraform Plan
-        run: terraform plan -input=false -no-color
+        working-directory: environments/${{ matrix.environment }}
+        run: |
+          terraform plan \
+            -var="db_password=${{secrets.DB_PASSWORD}}"\
+            -no-color
 
-  # Plan manuel pour l'environnement sélectionné.
-  terraform-plan-manual:
-    name: plan manuel ${{ inputs.environment }}
-    runs-on: ubuntu-24.04
-    if: github.event_name == 'workflow_dispatch' && inputs.action == 'plan'
-
-    defaults:
-      run:
-        working-directory: environments/${{ inputs.environment }}
-
-    env:
-      TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TF_VERSION }}
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Terraform Init
-        run: terraform init -input=false
-
-      - name: Terraform Validate
-        run: terraform validate -no-color
-
-      - name: Terraform Plan
-        run: terraform plan -input=false -no-color
-
-  # Déploiement manuel.
   terraform-apply:
-    name: apply ${{ inputs.environment }}
-    runs-on: ubuntu-24.04
-    if: github.event_name == 'workflow_dispatch' && inputs.action == 'apply'
-
+    name: apply ${{ github.event.inputs.environment }}
+    runs-on: ubuntu-latest  
+    if: github.event.action == 'apply'
+    
+    
     environment:
-      name: ${{ inputs.environment }}
-
-    concurrency:
-      group: terraform-mutation-${{ inputs.environment }}
-      cancel-in-progress: false
-
-    defaults:
-      run:
-        working-directory: environments/${{ inputs.environment }}
-
-    env:
-      TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
+      name: ${{ github.event.inputs.environment }}
 
     steps:
-      - name: Verify remote state readiness
-        working-directory: .
-        env:
-          REMOTE_STATE_READY: ${{ vars.TF_REMOTE_STATE_READY }}
-        run: |
-          if [ "$REMOTE_STATE_READY" != "true" ]; then
-            echo "::error::Configurer le backend distant et son verrouillage avant tout apply."
-            exit 1
-          fi
-
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -165,48 +95,25 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Terraform Init
-        run: terraform init -input=false
+        working-directory: environments/${{ github.event.inputs.environment }}
+        run: terraform init
 
-      - name: Terraform Validate
-        run: terraform validate -no-color
-
-      - name: Terraform Plan
-        run: terraform plan -input=false -no-color -out=tfplan
-
-      - name: Terraform Apply
-        run: terraform apply -input=false -no-color tfplan
-
-  # Destruction manuelle.
+      - name: Terraform apply
+        working-directory: environments/${{ github.event.inputs.environment }}
+        run: |
+          terraform apply \
+            -var="db_password=${{secrets.DB_PASSWORD}}"
+  
+            
   terraform-destroy:
-    name: destroy ${{ inputs.environment }}
-    runs-on: ubuntu-24.04
-    if: github.event_name == 'workflow_dispatch' && inputs.action == 'destroy'
-
+    name: destroy ${{ github.event.inputs.environment }}
+    runs-on: ubuntu-latest  
+    if: github.event.inputs.action == 'destroy'
+    
     environment:
-      name: ${{ inputs.environment }}
-
-    concurrency:
-      group: terraform-mutation-${{ inputs.environment }}
-      cancel-in-progress: false
-
-    defaults:
-      run:
-        working-directory: environments/${{ inputs.environment }}
-
-    env:
-      TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
+      name: ${{ github.event.inputs.environment }}
 
     steps:
-      - name: Verify remote state readiness
-        working-directory: .
-        env:
-          REMOTE_STATE_READY: ${{ vars.TF_REMOTE_STATE_READY }}
-        run: |
-          if [ "$REMOTE_STATE_READY" != "true" ]; then
-            echo "::error::Configurer le backend distant et son verrouillage avant tout destroy."
-            exit 1
-          fi
-
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -223,10 +130,11 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Terraform Init
-        run: terraform init -input=false
+        working-directory: environments/${{ github.event.inputs.environment }}
+        run: terraform init
 
-      - name: Terraform Destroy Plan
-        run: terraform plan -destroy -input=false -no-color -out=destroy.tfplan
-
-      - name: Terraform Destroy
-        run: terraform apply -input=false -no-color destroy.tfplan
+      - name: Terraform destroy
+        working-directory: environments/${{ github.event.inputs.environment }}
+        run: |
+          terraform destroy \
+            -var="db_password=${{secrets.DB_PASSWORD}}"          
