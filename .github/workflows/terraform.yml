@@ -1,7 +1,6 @@
 name: Terraform CI/CD
 
 on:
-  push:
   pull_request:
     branches: [main]
 
@@ -41,7 +40,7 @@ jobs:
   terraform-plan-pr:
     name: plan ${{ matrix.environment }}
     runs-on: ubuntu-24.04
-    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    if: github.event_name == 'pull_request' 
 
     strategy:
       fail-fast: false
