@@ -175,7 +175,7 @@ jobs:
   terraform-apply:
     name: apply ${{ github.event.inputs.environment }}
     runs-on: ubuntu-latest
-    if: github.event.action == 'apply'
+    if: github.event.inputs.action == 'apply'
 
     environment:
       name: ${{ github.event.inputs.environment }}
