@@ -100,7 +100,7 @@ jobs:
       - name: Terraform apply
         working-directory: environments/${{ github.event.inputs.environment }}
         run: |
-          terraform apply \
+          terraform apply -auto-approve \
             -var="db_password=${{secrets.DB_PASSWORD}}"
   
             
