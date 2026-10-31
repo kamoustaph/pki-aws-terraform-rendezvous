@@ -1,4 +1,5 @@
 # Terraform : garder .terraform.lock.hcl versionné
+**/.terraform.lock.hcl
 **/.terraform/*
 *.tfstate
 *.tfstate.*
