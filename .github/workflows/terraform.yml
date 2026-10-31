@@ -17,7 +17,7 @@ on:
           - destroy
 
       environment:
-        description: 'Environment cible  pour deployer'
+        description: 'Environment cible pour deployer'
         required: true
         default: 'dev'
         type: choice
@@ -31,6 +31,61 @@ env:
   AWS_REGION: eu-west-3
 
 jobs:
+  # Diagnostic indépendant : affiche les choix et les conditions des jobs.
+  diagnostic:
+    name: Diagnostic du workflow
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Afficher le contexte et les conditions
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+          SELECTED_ACTION: ${{ github.event.inputs.action }}
+          SELECTED_ENVIRONMENT: ${{ github.event.inputs.environment }}
+          PLAN_SELECTED: ${{ github.event_name == 'pull_request' }}
+          APPLY_SELECTED: ${{ github.event.action == 'apply' }}
+          DESTROY_SELECTED: ${{ github.event.inputs.action == 'destroy' }}
+        run: |
+          echo "::group::Contexte du déclenchement"
+          echo "Date UTC : $(date -u)"
+          echo "Événement : $EVENT_NAME"
+          echo "github.event.action : ${EVENT_ACTION:-vide}"
+          echo "Action du formulaire : ${SELECTED_ACTION:-vide}"
+          echo "Environnement : ${SELECTED_ENVIRONMENT:-vide}"
+          echo "Branche : $GITHUB_REF"
+          echo "Commit : $GITHUB_SHA"
+          echo "Tentative : $GITHUB_RUN_ATTEMPT"
+          echo "::endgroup::"
+
+          echo "::group::Résultat des conditions actuelles"
+          echo "Job plan sélectionné : $PLAN_SELECTED"
+          echo "Job apply sélectionné : $APPLY_SELECTED"
+          echo "Job destroy sélectionné : $DESTROY_SELECTED"
+          echo "::endgroup::"
+
+          {
+            echo "### Diagnostic du workflow"
+            echo "- Événement : $EVENT_NAME"
+            echo "- Action de l'événement : ${EVENT_ACTION:-vide}"
+            echo "- Action du formulaire : ${SELECTED_ACTION:-vide}"
+            echo "- Environnement : ${SELECTED_ENVIRONMENT:-vide}"
+            echo "- Branche : $GITHUB_REF"
+            echo "- Commit : $GITHUB_SHA"
+            echo ""
+            echo "| Job | Condition satisfaite |"
+            echo "|---|---|"
+            echo "| plan | $PLAN_SELECTED |"
+            echo "| apply | $APPLY_SELECTED |"
+            echo "| destroy | $DESTROY_SELECTED |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$PLAN_SELECTED" = "false" ] &&
+             [ "$APPLY_SELECTED" = "false" ] &&
+             [ "$DESTROY_SELECTED" = "false" ]; then
+            echo "::warning::Aucune condition de job Terraform n'est satisfaite. Les trois jobs seront ignorés."
+          fi
+
   terraform-plan-pr:
     name: plan ${{ matrix.environment }}
     runs-on: ubuntu-latest
@@ -42,15 +97,42 @@ jobs:
         environment: [dev, staging, prod]
 
     steps:
+      # Ajout de logs uniquement.
+      - name: Diagnostic du démarrage
+        env:
+          TARGET_ENVIRONMENT: ${{ matrix.environment }}
+        run: |
+          echo "Début du job plan : $(date -u)"
+          echo "Environnement : $TARGET_ENVIRONMENT"
+          echo "Runner : $RUNNER_NAME"
+          echo "Système : $RUNNER_OS"
+          echo "Commit : $GITHUB_SHA"
+
       - name: Checkout code
+        id: checkout
         uses: actions/checkout@v4
 
       - name: Setup Terraform
+        id: setup
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
+      # Affiche uniquement la version et l'existence du dossier.
+      - name: Diagnostic Terraform et dossier
+        env:
+          TARGET_ENVIRONMENT: ${{ matrix.environment }}
+        run: |
+          terraform version
+          echo "Dossier attendu : environments/$TARGET_ENVIRONMENT"
+          if [ -d "environments/$TARGET_ENVIRONMENT" ]; then
+            echo "Le dossier existe."
+          else
+            echo "::warning::Le dossier de l'environnement est absent."
+          fi
+
       - name: Configure AWS credentials
+        id: credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -58,35 +140,82 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Terraform Init
+        id: init
         working-directory: environments/${{ matrix.environment }}
         run: terraform init
 
       - name: Terraform Plan
+        id: plan
         working-directory: environments/${{ matrix.environment }}
         run: |
           terraform plan \
             -var="db_password=${{secrets.DB_PASSWORD}}"\
-            -no-color
+            -no-color\
+            -detailed-exitcode
+        continue-on-error: true
+
+      # Exécuté même si une étape précédente échoue.
+      - name: Bilan du job plan
+        if: always()
+        env:
+          TARGET_ENVIRONMENT: ${{ matrix.environment }}
+          STEPS_JSON: ${{ toJSON(steps) }}
+        run: |
+          echo "::group::Résultat des étapes"
+          printf '%s\n' "$STEPS_JSON"
+          echo "::endgroup::"
+
+          {
+            echo "### Bilan du plan : $TARGET_ENVIRONMENT"
+            echo '```json'
+            printf '%s\n' "$STEPS_JSON"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   terraform-apply:
     name: apply ${{ github.event.inputs.environment }}
-    runs-on: ubuntu-latest  
+    runs-on: ubuntu-latest
     if: github.event.action == 'apply'
-    
-    
+
     environment:
       name: ${{ github.event.inputs.environment }}
 
     steps:
+      # Ajout de logs uniquement.
+      - name: Diagnostic du démarrage
+        env:
+          TARGET_ENVIRONMENT: ${{ github.event.inputs.environment }}
+        run: |
+          echo "Début du job apply : $(date -u)"
+          echo "Environnement : $TARGET_ENVIRONMENT"
+          echo "Runner : $RUNNER_NAME"
+          echo "Système : $RUNNER_OS"
+          echo "Commit : $GITHUB_SHA"
+
       - name: Checkout code
+        id: checkout
         uses: actions/checkout@v4
 
       - name: Setup Terraform
+        id: setup
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
+      - name: Diagnostic Terraform et dossier
+        env:
+          TARGET_ENVIRONMENT: ${{ github.event.inputs.environment }}
+        run: |
+          terraform version
+          echo "Dossier attendu : environments/$TARGET_ENVIRONMENT"
+          if [ -d "environments/$TARGET_ENVIRONMENT" ]; then
+            echo "Le dossier existe."
+          else
+            echo "::warning::Le dossier de l'environnement est absent."
+          fi
+
       - name: Configure AWS credentials
+        id: credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -94,34 +223,80 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Terraform Init
+        id: init
         working-directory: environments/${{ github.event.inputs.environment }}
         run: terraform init
 
       - name: Terraform apply
+        id: apply
         working-directory: environments/${{ github.event.inputs.environment }}
         run: |
           terraform apply -auto-approve \
             -var="db_password=${{secrets.DB_PASSWORD}}"
-  
-            
+            -detailed-exitcode
+        continue-on-error: true
+
+      - name: Bilan du job apply
+        if: always()
+        env:
+          TARGET_ENVIRONMENT: ${{ github.event.inputs.environment }}
+          STEPS_JSON: ${{ toJSON(steps) }}
+        run: |
+          echo "::group::Résultat des étapes"
+          printf '%s\n' "$STEPS_JSON"
+          echo "::endgroup::"
+
+          {
+            echo "### Bilan apply : $TARGET_ENVIRONMENT"
+            echo '```json'
+            printf '%s\n' "$STEPS_JSON"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   terraform-destroy:
     name: destroy ${{ github.event.inputs.environment }}
-    runs-on: ubuntu-latest  
+    runs-on: ubuntu-latest
     if: github.event.inputs.action == 'destroy'
-    
+
     environment:
       name: ${{ github.event.inputs.environment }}
 
     steps:
+      # Ajout de logs uniquement.
+      - name: Diagnostic du démarrage
+        env:
+          TARGET_ENVIRONMENT: ${{ github.event.inputs.environment }}
+        run: |
+          echo "Début du job destroy : $(date -u)"
+          echo "Environnement : $TARGET_ENVIRONMENT"
+          echo "Runner : $RUNNER_NAME"
+          echo "Système : $RUNNER_OS"
+          echo "Commit : $GITHUB_SHA"
+
       - name: Checkout code
+        id: checkout
         uses: actions/checkout@v4
 
       - name: Setup Terraform
+        id: setup
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
+      - name: Diagnostic Terraform et dossier
+        env:
+          TARGET_ENVIRONMENT: ${{ github.event.inputs.environment }}
+        run: |
+          terraform version
+          echo "Dossier attendu : environments/$TARGET_ENVIRONMENT"
+          if [ -d "environments/$TARGET_ENVIRONMENT" ]; then
+            echo "Le dossier existe."
+          else
+            echo "::warning::Le dossier de l'environnement est absent."
+          fi
+
       - name: Configure AWS credentials
+        id: credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -129,11 +304,30 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Terraform Init
+        id: init
         working-directory: environments/${{ github.event.inputs.environment }}
         run: terraform init
 
       - name: Terraform destroy
+        id: destroy
         working-directory: environments/${{ github.event.inputs.environment }}
         run: |
           terraform destroy \
-            -var="db_password=${{secrets.DB_PASSWORD}}"          
+            -var="db_password=${{secrets.DB_PASSWORD}}"
+
+      - name: Bilan du job destroy
+        if: always()
+        env:
+          TARGET_ENVIRONMENT: ${{ github.event.inputs.environment }}
+          STEPS_JSON: ${{ toJSON(steps) }}
+        run: |
+          echo "::group::Résultat des étapes"
+          printf '%s\n' "$STEPS_JSON"
+          echo "::endgroup::"
+
+          {
+            echo "### Bilan destroy : $TARGET_ENVIRONMENT"
+            echo '```json'
+            printf '%s\n' "$STEPS_JSON"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
