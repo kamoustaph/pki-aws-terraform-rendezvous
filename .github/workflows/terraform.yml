@@ -68,6 +68,10 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
 
+    permissions:
+      id-token: write
+      contents: read
+
     strategy:
       fail-fast: false
       matrix:
@@ -85,8 +89,9 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          # aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          # aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN}}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Terraform Init
@@ -121,6 +126,11 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event.inputs.action == 'apply'
 
+    permissions:
+      id-token: write
+      contents: read
+
+
     environment:
       name: ${{ github.event.inputs.environment }}
 
@@ -136,8 +146,9 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          # aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          # aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN}}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Terraform Init
@@ -169,6 +180,10 @@ jobs:
     name: destroy ${{ github.event.inputs.environment }}
     runs-on: ubuntu-latest
     if: github.event.inputs.action == 'destroy'
+    permissions:
+      id-token: write
+      contents: read
+
 
     environment:
       name: ${{ github.event.inputs.environment }}
@@ -185,8 +200,9 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          # aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          # aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN}}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Terraform Init
