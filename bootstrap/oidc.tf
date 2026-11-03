@@ -79,7 +79,11 @@ resource "aws_iam_role_policy" "github_actions" {
           "elasticloadbalancing:*",
           "s3:*",
           "dynamodb:*",
-          "iam:*"
+          "iam:*",
+          # Ajouts pour le déploiement de Yoon (étape 2) :
+          # paramètres SSM (secrets de l'application) et lecture ECR.
+          "ssm:*",
+          "ecr:*"
         ]
 
         Resource = "*"
