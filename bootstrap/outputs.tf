@@ -8,6 +8,6 @@ output "s3_bucket_name" {
 }
 
 output "github_actions_role_arn" {
-  value = aws_iam_role.github_actions.arn
+  value       = aws_iam_role.github_actions.arn
   description = "ARN du rôle à mettre dans le pipeline"
 }
