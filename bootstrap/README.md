@@ -9,22 +9,35 @@ L’infrastructure constitue la base du projet de gestion de rendez-vous Spring 
 Les opérations suivantes ont été réalisées :
 
 - Déploiement de l’infrastructure AWS dans la région Paris (`eu-west-3`).
-- Installation automatique de Nginx sur deux instances EC2.
-- Accès HTTP via l’Application Load Balancer.
-- Vérification de la santé des deux cibles de l’ALB.
-- Connexion SSH à une instance EC2.
-- Connexion MySQL depuis EC2 vers RDS.
-- Création du bucket S3 destiné aux states Terraform.
-- Configuration des backends par environnement.
-- Test de déploiement et de destruction depuis GitHub Actions.
 
-Le dernier journal de destruction examiné indique :
+- Installation automatique de Nginx sur deux instances EC2.
+
+- Accès HTTP via l’Application Load Balancer.
+
+- Vérification de la santé des deux cibles de l’ALB.
+
+- Connexion SSH à une instance EC2.
+
+- Connexion MySQL depuis EC2 vers RDS.
+
+- Création du bucket S3 destiné aux states Terraform.
+
+- Configuration des backends par environnement.
+
+- Test de déploiement et de destruction depuis GitHub Actions.
+- Connexion OIDC validée pour les plans sur pull request.
+- Déploiement manuel dev via OIDC validé : 34 ressources créées.
+- Test HTTP réussi : « Bienvenue sur l’instance EC2-2-dev ».
+
+Un précédent test de destruction, avant le nouveau déploiement OIDC, a indiqué :
 
 ```text
 Destroy complete! Resources: 34 destroyed.
 ```
 
-La vérification des snapshots RDS manuels n’a retourné aucun résultat après ce nettoyage.
+La vérification des snapshots RDS manuels n’a retourné aucun résultat après ce nettoyage précédent.
+
+Un nouveau déploiement dev a ensuite réussi via OIDC (exécution nº 57). Sa destruction n’est pas encore confirmée.
 
 Le bucket S3 du bootstrap est conservé pour les prochains déploiements.
 
@@ -33,34 +46,56 @@ Le bucket S3 du bootstrap est conservé pour les prochains déploiements.
 L’environnement comprend :
 
 - Un VPC.
+
 - Deux sous-réseaux publics et deux sous-réseaux privés.
+
 - Une Internet Gateway.
+
 - Une NAT Gateway et son Elastic IP.
+
 - Des tables de routage.
+
 - Des groupes de sécurité.
+
 - Deux instances EC2 avec Nginx.
+
 - Un Application Load Balancer et son groupe cible.
+
 - Une base RDS MySQL dans les sous-réseaux privés.
 
 Le stockage du state est séparé de cette infrastructure :
 
 - `bootstrap` crée le bucket S3.
+
 - Chaque environnement utilise son propre fichier state dans ce bucket.
 
 ## 3. Organisation du dépôt
 
 | Chemin | Contenu |
+
 |---|---|
+
 | `bootstrap/main.tf` | Création et protection du bucket S3 |
-| `bootstrap/outputs.tf` | Nom du bucket créé |
+
+| `bootstrap/outputs.tf` | Nom du bucket et ARN du rôle GitHub |
+| `bootstrap/oidc.tf` | Fournisseur OIDC, rôle et permissions GitHub Actions |
+
 | `modules/vpc/` | Réseau et routage |
+
 | `modules/security/` | Groupes et règles de sécurité |
+
 | `modules/ec2/` | Instances EC2 |
+
 | `modules/rds/` | Base MySQL RDS |
+
 | `modules/alb/` | Load balancer et groupe cible |
+
 | `environments/dev/` | Configuration de développement |
+
 | `environments/staging/` | Configuration de staging |
+
 | `environments/prod/` | Configuration de production |
+
 | `.github/workflows/terraform.yml` | Pipeline GitHub Actions |
 
 Les fichiers Terraform encore présents à la racine correspondent à la configuration historique. Les commandes décrites ci-dessous utilisent les dossiers `environments/`.
@@ -68,18 +103,27 @@ Les fichiers Terraform encore présents à la racine correspondent à la configu
 Chaque dossier d’environnement contient notamment :
 
 - `main.tf`
+
 - `variables.tf`
+
 - `outputs.tf`
+
 - `terraform.tfvars`
+
 - `backend.tf`
 
 ## 4. Prérequis
 
-- Terraform `1.17.0`, version utilisée pour les tests.
+- Terraform `1.17.0` en local ; le workflow OIDC examiné utilise `1.10.0`. Les deux prennent en charge le verrouillage S3. Harmoniser les versions avant les prochaines évolutions.
+
 - AWS CLI configurée.
+
 - Git.
+
 - Un compte AWS et les permissions nécessaires.
+
 - Une paire de clés EC2 existante dans la région ciblée.
+
 - Un accès au dépôt GitHub pour exécuter le pipeline.
 
 Vérifier les outils et l’identité AWS :
@@ -101,7 +145,7 @@ La version Terraform configurée dans le pipeline doit également être compatib
 
 ```yaml
 env:
-  TF_VERSION: "1.17.0"
+  TF_VERSION: "1.10.0"
   AWS_REGION: eu-west-3
 ```
 
@@ -112,7 +156,9 @@ Le fichier `terraform.tfstate` associe les ressources du code à leurs identifia
 Il permet à Terraform de déterminer :
 
 - Les ressources déjà créées.
+
 - Les modifications nécessaires.
+
 - Les ressources à supprimer.
 
 Un runner GitHub Actions est temporaire. Un state uniquement local n’est pas automatiquement transmis à l’exécution suivante.
@@ -136,10 +182,15 @@ Ajouter un backend distant ne permet pas de retrouver automatiquement les ressou
 Le dossier `bootstrap` crée quatre ressources Terraform :
 
 | Ressource | Rôle |
+
 |---|---|
+
 | `aws_s3_bucket` | Stockage des states |
+
 | `aws_s3_bucket_versioning` | Conservation des versions précédentes |
+
 | `aws_s3_bucket_server_side_encryption_configuration` | Chiffrement SSE-S3 |
+
 | `aws_s3_bucket_public_access_block` | Blocage des accès publics |
 
 Nom du bucket utilisé :
@@ -156,7 +207,6 @@ Le bootstrap utilise le provider AWS fixé à `5.0.0`. La version du provider AW
 
 ```powershell
 cd C:\terraform_modules_moustapha\bootstrap
-
 terraform init
 terraform fmt
 terraform validate
@@ -178,7 +228,7 @@ Vérifier les ressources gérées :
 terraform state list
 ```
 
-Résultat attendu :
+Résultat après le bootstrap S3 initial, avant ajout des ressources OIDC :
 
 ```text
 aws_s3_bucket.terraform_bucket
@@ -197,7 +247,7 @@ bootstrap/terraform.tfstate
 
 Conserver une sauvegarde sécurisée de ce fichier et ne pas le publier dans Git.
 
-Ne pas exécuter `terraform destroy` dans `bootstrap` pour nettoyer un environnement : ce dossier gère le bucket partagé.
+Ne pas exécuter `terraform destroy` dans `bootstrap` pour nettoyer un environnement : ce dossier gère le bucket partagé et les ressources IAM OIDC ajoutées ensuite.
 
 ## 7. Backend S3 des environnements
 
@@ -211,7 +261,6 @@ terraform {
     bucket = "terraform-bucket-moustapha-2026"
     key    = "dev/terraform.tfstate"
     region = "eu-west-3"
-
     encrypt      = true
     use_lockfile = true
   }
@@ -223,9 +272,13 @@ terraform {
 Les fichiers utilisent le même bucket, avec des clés distinctes :
 
 | Environnement | Clé S3 |
+
 |---|---|
+
 | dev | `dev/terraform.tfstate` |
+
 | staging | `staging/terraform.tfstate` |
+
 | prod | `prod/terraform.tfstate` |
 
 Les chemins ci-dessus correspondent au workspace `default`.
@@ -253,7 +306,9 @@ Le verrouillage Terraform est distinct de la fonctionnalité S3 Object Lock.
 Les identifiants utilisés localement et dans GitHub Actions doivent pouvoir :
 
 - Lister les préfixes nécessaires du bucket.
+
 - Lire et écrire le state de l’environnement.
+
 - Lire, créer et supprimer son fichier de verrouillage.
 
 Le chiffrement ne remplace pas les permissions IAM.
@@ -264,7 +319,6 @@ Pour `dev` :
 
 ```powershell
 cd C:\terraform_modules_moustapha\environments\dev
-
 terraform init
 terraform workspace show
 terraform state list
@@ -294,7 +348,6 @@ Exemple pour `dev` :
 
 ```powershell
 cd C:\terraform_modules_moustapha\environments\dev
-
 terraform init
 terraform fmt
 terraform validate
@@ -322,12 +375,19 @@ Répéter l’opération dans `staging` ou `prod` uniquement lorsque leur déplo
 Les paramètres d’un environnement incluent notamment :
 
 - Région AWS.
+
 - AMI.
+
 - Type d’instance.
+
 - Nom de la paire de clés.
+
 - Nom du projet.
+
 - Environnement.
+
 - Paramètres RDS.
+
 - Plages IPv4 autorisées pour SSH.
 
 Pour autoriser une seule IPv4 publique en SSH :
@@ -364,15 +424,21 @@ Le state et les plans peuvent contenir le mot de passe même si son affichage es
 Une pull request vers `main` lance les plans pour :
 
 - `dev`
+
 - `staging`
+
 - `prod`
 
 Le job de diagnostic affiche notamment :
 
 - Le type d’événement.
+
 - La branche.
+
 - Le commit.
+
 - Les choix du formulaire manuel.
+
 - Le résultat des conditions des jobs.
 
 ### Exécution manuelle
@@ -380,10 +446,15 @@ Le job de diagnostic affiche notamment :
 Depuis GitHub :
 
 1. Ouvrir **Actions**.
+
 2. Sélectionner **Terraform CI/CD**.
+
 3. Cliquer sur **Run workflow**.
+
 4. Sélectionner la branche contenant la configuration souhaitée.
+
 5. Choisir l’action et l’environnement.
+
 6. Confirmer le lancement.
 
 Le job `apply` doit lire l’entrée du formulaire :
@@ -406,17 +477,22 @@ Les exécutions manuelles doivent utiliser un backend correctement initialisé e
 
 Configurer dans les paramètres Actions du dépôt :
 
-- `AWS_ACCESS_KEY_ID`
-- `AWS_SECRET_ACCESS_KEY`
-- `DB_PASSWORD`
+- `AWS_ROLE_ARN` : ARN du rôle OIDC.
+
+- `DB_PASSWORD` : mot de passe RDS.
+
+Les jobs migrés utilisent OIDC à la place des clés AWS permanentes. Voir la section 18.
 
 Ne jamais afficher ces valeurs dans les logs.
 
 ### Lire les résultats
 
 - `Queued` : le job attend son démarrage.
+
 - `Skipped` : sa condition n’est pas satisfaite.
+
 - `Failure` : une étape a échoué.
+
 - `Success` : le job a terminé selon ses règles de gestion des erreurs.
 
 Avec `continue-on-error: true`, une erreur peut être masquée par un statut global vert. Examiner les logs et les résultats des étapes.
@@ -424,9 +500,13 @@ Avec `continue-on-error: true`, une erreur peut être masquée par un statut glo
 L’option `-detailed-exitcode` concerne `terraform plan` :
 
 | Code | Signification |
+
 |---|---|
+
 | 0 | Plan réussi, aucun changement |
+
 | 1 | Erreur |
+
 | 2 | Plan réussi, changements prévus |
 
 Ne pas utiliser cette option avec `terraform apply`.
@@ -494,7 +574,6 @@ Exemple pour `dev` :
 
 ```powershell
 cd C:\terraform_modules_moustapha\environments\dev
-
 terraform init
 terraform state list
 terraform plan -destroy -out=destroy.tfplan
@@ -532,20 +611,16 @@ Exemples de règles `.gitignore` :
 ```gitignore
 # Cache Terraform.
 **/.terraform/*
-
 # States et sauvegardes de state.
 *.tfstate
 *.tfstate.*
-
 # Plans sauvegardés.
 *.tfplan
 *.plan
 tfplan
-
 # Journaux locaux.
 crash.log
 crash.*.log
-
 # Secrets.
 .env
 .env.*
@@ -564,14 +639,23 @@ Les fichiers `.tfvars` ne doivent être publiés que s’ils ne contiennent aucu
 ## 15. Dépannage
 
 | Message | Cause ou vérification |
+
 |---|---|
+
 | `touch` non reconnu | Utiliser `New-Item` sous PowerShell |
+
 | `Reference to undeclared resource` | Vérifier le nom exact de la ressource référencée |
+
 | `failed to get shared config profile` | Un profil local est imposé dans une configuration utilisée par GitHub |
+
 | `already exists` | Vérifier le backend et le state avant tout nouvel apply |
+
 | `-detailed-exitcode: command not found` | Option isolée dans le script shell |
+
 | Tous les jobs sont ignorés | Examiner leurs conditions `if:` |
+
 | `No state file was found` | Vérifier le dossier, le backend et l’existence d’un state |
+
 | `Error acquiring the state lock` | Vérifier qu’aucune autre opération n’utilise le même state |
 
 Ne pas supprimer manuellement un verrou sans avoir confirmé qu’aucune opération Terraform n’est encore active.
@@ -581,10 +665,15 @@ Ne pas supprimer manuellement un verrou sans avoir confirmé qu’aucune opérat
 Les ressources du laboratoire peuvent générer des frais, notamment :
 
 - EC2 et volumes EBS.
+
 - RDS et snapshots.
+
 - ALB.
+
 - NAT Gateway.
+
 - Adresses IPv4 publiques.
+
 - Stockage et requêtes S3.
 
 La destruction d’un environnement supprime les ressources présentes dans son state. Elle ne supprime pas automatiquement les ressources étrangères à ce state.
@@ -594,8 +683,283 @@ Après un test, vérifier la réussite du destroy et les éventuelles sauvegarde
 ## 17. Évolutions prévues
 
 - Intégration de l’application Spring Boot / Angular.
+
 - Intégration de la PKI EJBCA / SoftHSM.
-- Authentification GitHub Actions vers AWS par OIDC.
+
+- Séparation des rôles de plan et de déploiement avec permissions adaptées.
+
 - Affinement des permissions IAM par environnement.
+
 - Sauvegarde durable du state du bootstrap.
+
 - Documentation des tests applicatifs et PKI.
+
+## 18. Authentification AWS avec OIDC
+
+### Objectif
+
+GitHub Actions utilise désormais OpenID Connect pour obtenir des identifiants AWS temporaires. Les jobs migrés ne transmettent plus de clés permanentes AWS.
+
+1. GitHub émet un jeton signé identifiant le job.
+2. L’action `configure-aws-credentials` le transmet à AWS STS.
+3. AWS vérifie le fournisseur, l’audience et le sujet autorisé par la confiance du rôle.
+4. STS fournit une session temporaire du rôle IAM.
+5. Terraform utilise cette session pour S3 et les ressources AWS autorisées.
+
+OIDC authentifie le job. La politique IAM définit ses permissions. S3 conserve le state : ces trois fonctions sont distinctes.
+
+### Paramètres du projet
+
+| Paramètre | Valeur |
+|---|---|
+| Compte AWS | `231644789895` |
+| Dépôt | `kamoustaph/pki-aws-terraform-rendezvous` |
+| Fournisseur OIDC | `https://token.actions.githubusercontent.com` |
+| Audience | `sts.amazonaws.com` |
+| Rôle | `github-actions-role` |
+| ARN du rôle | `arn:aws:iam::231644789895:role/github-actions-role` |
+
+### Étape 1 — Fournisseur OIDC
+
+Le fournisseur est déclaré dans `bootstrap/oidc.tf` par la ressource `aws_iam_openid_connect_provider.github` :
+
+- URL : `https://token.actions.githubusercontent.com`.
+- Liste des audiences : `sts.amazonaws.com`.
+- Les empreintes présentes dans le fichier sont celles de la configuration du laboratoire ; vérifier les recommandations du provider lors d’une nouvelle installation plutôt que recopier des empreintes historiques.
+
+Il peut être consulté dans **IAM → Fournisseurs d’identité**. Dans ce projet, Terraform le gère : il n’est pas nécessaire de le créer une seconde fois dans la console.
+
+Si le fournisseur existe déjà mais n’est pas dans le state du bootstrap, il faut l’importer avant d’appliquer sa déclaration :
+
+```powershell
+cd C:\terraform_modules_moustapha\bootstrap
+terraform import aws_iam_openid_connect_provider.github arn:aws:iam::231644789895:oidc-provider/token.actions.githubusercontent.com
+terraform plan
+```
+
+Ne pas effectuer cet import si Terraform gère déjà le fournisseur.
+
+### Étape 2 — Confiance du rôle
+
+Le rôle `aws_iam_role.github_actions` autorise `sts:AssumeRoleWithWebIdentity` depuis le fournisseur GitHub.
+
+Son bloc de confiance est :
+
+```hcl
+assume_role_policy = jsonencode({
+  Version = "2012-10-17"
+  Statement = [{
+    Effect = "Allow"
+    Principal = {
+      Federated = aws_iam_openid_connect_provider.github.arn
+    }
+    Action = "sts:AssumeRoleWithWebIdentity"
+    Condition = {
+      StringEquals = {
+        "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+        "token.actions.githubusercontent.com:sub" = [
+          "repo:kamoustaph@162557925/pki-aws-terraform-rendezvous@1433162106:pull_request",
+          "repo:kamoustaph@162557925/pki-aws-terraform-rendezvous@1433162106:environment:dev",
+          "repo:kamoustaph@162557925/pki-aws-terraform-rendezvous@1433162106:environment:staging",
+          "repo:kamoustaph@162557925/pki-aws-terraform-rendezvous@1433162106:environment:prod",
+          "repo:kamoustaph@162557925/pki-aws-terraform-rendezvous@1433162106:ref:refs/heads/main"
+        ]
+      }
+    }
+  }]
+})
+```
+
+Ce bloc appartient à la ressource du rôle existante. Ne pas déclarer une deuxième ressource identique.
+
+| Fin du sujet | Job autorisé |
+|---|---|
+| `pull_request` | Pull request sans environnement GitHub |
+| `environment:dev` | Job utilisant l’environnement GitHub dev |
+| `environment:staging` | Job utilisant staging |
+| `environment:prod` | Job utilisant prod |
+| `ref:refs/heads/main` | Job sur main sans environnement, hors pull request |
+
+`matrix.environment` est une valeur de matrice ; seul `environment:` associe le job à un environnement GitHub.
+
+Les sujets `environment:...` ne restreignent pas à eux seuls la branche source. Configurer les protections et branches autorisées dans **Settings → Environments**.
+
+### Étape 3 — Permissions AWS
+
+La confiance définit qui entre dans le rôle. La ressource `aws_iam_role_policy.github_actions` définit ensuite ce qu’il peut faire.
+
+Le laboratoire utilise actuellement des permissions larges, avec `Resource = "*"`, sur EC2, RDS, ELB, S3 et IAM. Ce n’est pas une politique de moindre privilège.
+
+Améliorations restant à réaliser :
+
+- Séparer le rôle de plan sur pull request des rôles de déploiement.
+- Limiter S3 au bucket de state et aux chemins nécessaires.
+- Retirer les permissions IAM non nécessaires aux modules.
+- Retirer `dynamodb:*` si aucun autre usage ne le nécessite.
+- Retirer `vpc:*` : les autorisations VPC utilisent le préfixe `ec2:`.
+
+Actuellement, une pull request autorisée peut assumer le même rôle doté de droits d’écriture. OIDC ne réduit pas automatiquement ces droits.
+
+### Étape 4 — Appliquer le bootstrap
+
+```powershell
+cd C:\terraform_modules_moustapha\bootstrap
+terraform fmt
+terraform validate
+terraform plan
+terraform apply
+```
+
+Examiner le plan avant confirmation. La synchronisation de confiance réalisée a donné :
+
+```text
+Apply complete! Resources: 0 added, 1 changed, 0 destroyed.
+```
+
+Vérifier la confiance réelle :
+
+```powershell
+aws iam get-role --role-name github-actions-role --query "Role.AssumeRolePolicyDocument" --output json
+```
+
+L’output suivant est déclaré dans `bootstrap/outputs.tf` :
+
+```hcl
+output "github_actions_role_arn" {
+  description = "ARN du rôle utilisé par GitHub Actions avec OIDC."
+  value       = aws_iam_role.github_actions.arn
+}
+```
+
+Toute correction manuelle dans AWS doit être reportée dans Terraform pour éviter son remplacement au prochain apply.
+
+### Étape 5 — Secret GitHub
+
+Dans **Settings → Secrets and variables → Actions**, définir `AWS_ROLE_ARN` :
+
+```text
+arn:aws:iam::231644789895:role/github-actions-role
+```
+
+Conserver aussi `DB_PASSWORD` pour RDS. L’ARN n’est pas confidentiel et pourrait être une variable ; le workflow actuel utilise un secret.
+
+GitHub ne réaffiche pas les valeurs enregistrées : un champ vide dans le formulaire de modification d’un secret est normal.
+
+Les jobs OIDC ne référencent plus `AWS_ACCESS_KEY_ID` et `AWS_SECRET_ACCESS_KEY`. Vérifier tous les usages des anciennes clés avant de les désactiver. La connexion AWS CLI locale reste indépendante.
+
+### Étape 6 — Workflow GitHub Actions
+
+Dans chaque job ayant besoin d’AWS :
+
+```yaml
+permissions:
+  id-token: write
+  contents: read
+```
+
+Avant `terraform init`, utiliser :
+
+```yaml
+- name: Configure AWS credentials
+  uses: aws-actions/configure-aws-credentials@v4
+  with:
+    role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+    aws-region: eu-west-3
+
+- name: Vérifier l'identité AWS
+  run: aws sts get-caller-identity
+```
+
+La session attendue contient :
+
+```text
+arn:aws:sts::231644789895:assumed-role/github-actions-role/GitHubActions
+```
+
+Les jobs manuels déclarent aussi :
+
+```yaml
+environment:
+  name: ${{ github.event.inputs.environment }}
+```
+
+`id-token: write` permet de demander un jeton GitHub ; les permissions sur AWS proviennent du rôle IAM.
+
+### Étape 7 — Erreur rencontrée et correction
+
+Le premier essai échouait avant Terraform :
+
+```text
+Not authorized to perform sts:AssumeRoleWithWebIdentity
+```
+
+La confiance attendait :
+
+```text
+repo:kamoustaph/pki-aws-terraform-rendezvous:pull_request
+```
+
+Le jeton contenait :
+
+```text
+repo:kamoustaph@162557925/pki-aws-terraform-rendezvous@1433162106:pull_request
+```
+
+Les identifiants du propriétaire et du dépôt font partie du sujet réel. L’ARN et l’audience étaient corrects. La correction a consisté à autoriser les sujets exacts avec ces identifiants.
+
+Diagnostic à placer avant la connexion AWS :
+
+```yaml
+- name: Diagnostic OIDC
+  uses: actions/github-script@v7
+  with:
+    script: |
+      const token = await core.getIDToken('sts.amazonaws.com');
+      core.setSecret(token);
+      const claims = JSON.parse(
+        Buffer.from(token.split('.')[1], 'base64url').toString('utf8')
+      );
+      core.info(`Émetteur : ${claims.iss}`);
+      core.info(`Audience : ${claims.aud}`);
+      core.info(`Sujet : ${claims.sub}`);
+      core.info(`Dépôt : ${claims.repository}`);
+```
+
+Ne pas afficher le jeton complet. Mettre aussi à jour tout ancien diagnostic qui compare encore le sujet au format sans identifiants.
+
+### Étape 8 — Résultats validés
+
+| Test | Résultat |
+|---|---|
+| Plan dev sur pull request | 34 créations prévues |
+| Plan staging sur pull request | 33 créations prévues |
+| Plan prod sur pull request | 33 créations prévues |
+| Session AWS du déploiement dev | Rôle temporaire `github-actions-role` |
+| Backend S3 | Initialisé avec succès |
+| Apply manuel dev, exécution nº 57 | 34 ressources créées |
+| HTTP via ALB | « Bienvenue sur l’instance EC2-2-dev » |
+| Apply staging et prod via OIDC | Non confirmés |
+| Destroy du nouveau déploiement dev via OIDC | Non confirmé à ce stade |
+
+Le code `2` des plans est attendu avec `-detailed-exitcode` lorsqu’il existe des changements.
+
+Le journal du déploiement confirme :
+
+```text
+Successfully configured the backend "s3"!
+Apply complete! Resources: 34 added, 0 changed, 0 destroyed.
+```
+
+La page Nginx confirme l’accès HTTP via l’ALB et une réponse d’EC2-2. Elle ne valide pas Spring Boot, Angular ou la PKI.
+
+### Étape 9 — Terminer le cycle de test
+
+Après les vérifications HTTP, lancer manuellement `destroy` pour le même environnement et le même backend. Vérifier son journal et les snapshots RDS éventuellement conservés.
+
+Un précédent destroy de 34 ressources est documenté dans ce README ; il ne prouve pas la suppression du nouveau déploiement OIDC. Conserver le bucket et les ressources IAM du bootstrap.
+
+### Références officielles
+
+- [OIDC avec AWS — GitHub](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-aws)
+- [Référence OIDC — GitHub](https://docs.github.com/en/actions/reference/security/oidc)
+- [configure-aws-credentials — AWS](https://github.com/aws-actions/configure-aws-credentials)
