@@ -29,6 +29,8 @@ on:
 env:
   TF_VERSION: 1.10.0
   AWS_REGION: eu-west-3
+  EXPECTED_ROLE_ARN_SUFFIX: ':role/github-actions-role'
+  EXPECTED_ACCOUNT_ID: '231644789895'
 
 jobs:
   # Diagnostic simplifié : affiche les choix et les conditions.
@@ -52,7 +54,7 @@ jobs:
           echo "- **Environnement** : \`${SELECTED_ENVIRONMENT:-aucun (PR)}\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Commit** : \`$GITHUB_SHA\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          
+
           echo "| Job | Condition satisfaite |" >> $GITHUB_STEP_SUMMARY
           echo "|---|---|" >> $GITHUB_STEP_SUMMARY
           echo "| plan | $PLAN_SELECTED |" >> $GITHUB_STEP_SUMMARY
@@ -86,13 +88,75 @@ jobs:
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
+      # ---------------------------------------------------------------
+      # 🔍 DEBUG OIDC : vérifie le secret et affiche les claims du token
+      # (le token lui-même n'est jamais affiché)
+      # ---------------------------------------------------------------
+      - name: 🔍 Debug OIDC
+        uses: actions/github-script@v7
+        env:
+          ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+        with:
+          script: |
+            const arn = process.env.ROLE_ARN || '';
+            const suffix = process.env.EXPECTED_ROLE_ARN_SUFFIX;
+            const account = process.env.EXPECTED_ACCOUNT_ID;
+
+            core.startGroup('1) Secret AWS_ROLE_ARN');
+            core.info(`Défini                     : ${arn.length > 0}`);
+            core.info(`Longueur (attendu 50)      : ${arn.length}`);
+            core.info(`Commence par arn:aws:iam:: : ${arn.startsWith('arn:aws:iam::')}`);
+            core.info(`Contient le bon compte     : ${arn.includes(account)}`);
+            core.info(`Finit par ${suffix} : ${arn.endsWith(suffix)}`);
+            core.info(`Espaces / retours ligne    : ${arn !== arn.trim()}`);
+            core.endGroup();
+
+            if (!arn) core.warning('Le secret AWS_ROLE_ARN est VIDE pour ce job (secret repository manquant ?)');
+            if (arn !== arn.trim()) core.warning('Le secret AWS_ROLE_ARN contient des espaces ou un retour à la ligne');
+
+            core.startGroup('2) Claims du token OIDC');
+            let claims;
+            try {
+              const token = await core.getIDToken('sts.amazonaws.com');
+              claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString());
+            } catch (e) {
+              core.setFailed(`Impossible d'obtenir le token OIDC : ${e.message} (permission id-token: write ? PR depuis un fork ?)`);
+              return;
+            }
+            for (const k of ['iss', 'aud', 'sub', 'repository', 'repository_owner', 'event_name', 'ref', 'environment', 'job_workflow_ref']) {
+              core.info(`${k.padEnd(18)}: ${claims[k] ?? '(absent)'}`);
+            }
+            core.endGroup();
+
+            const expectedSub = `repo:${context.repo.owner}/${context.repo.repo}:pull_request`;
+            core.info(`sub attendu par la trust policy : ${expectedSub}`);
+            core.info(`sub reçu                        : ${claims.sub}`);
+            if (claims.sub !== expectedSub) {
+              core.warning(`Le sub ne correspond pas ! Mets "${claims.sub}" dans la trust policy AWS.`);
+            } else {
+              core.info('✅ Le sub correspond à la trust policy.');
+            }
+
+            await core.summary
+              .addHeading(`🔍 Debug OIDC (${process.env.MATRIX_ENV || 'plan'})`, 3)
+              .addTable([
+                [{data: 'Élément', header: true}, {data: 'Valeur', header: true}],
+                ['Secret défini', String(arn.length > 0)],
+                ['Longueur secret (attendu 50)', String(arn.length)],
+                ['sub reçu', claims.sub],
+                ['sub attendu', expectedSub],
+                ['aud', String(claims.aud)],
+              ])
+              .write();
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          # aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          # aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN}}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
+
+      - name: ✅ Vérifier l'identité AWS
+        run: aws sts get-caller-identity
 
       - name: Terraform Init
         working-directory: environments/${{ matrix.environment }}
@@ -103,7 +167,7 @@ jobs:
         working-directory: environments/${{ matrix.environment }}
         run: |
           terraform plan \
-            -var="db_password=${{secrets.DB_PASSWORD}}" \
+            -var="db_password=${{ secrets.DB_PASSWORD }}" \
             -no-color \
             -detailed-exitcode
         continue-on-error: true
@@ -130,7 +194,6 @@ jobs:
       id-token: write
       contents: read
 
-
     environment:
       name: ${{ github.event.inputs.environment }}
 
@@ -143,13 +206,23 @@ jobs:
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
+      - name: 🔍 Debug OIDC (sub)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const token = await core.getIDToken('sts.amazonaws.com');
+            const c = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString());
+            core.info(`sub reçu : ${c.sub}`);
+            core.info(`aud      : ${c.aud}`);
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          # aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          # aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN}}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
+
+      - name: ✅ Vérifier l'identité AWS
+        run: aws sts get-caller-identity
 
       - name: Terraform Init
         working-directory: environments/${{ github.event.inputs.environment }}
@@ -160,7 +233,7 @@ jobs:
         working-directory: environments/${{ github.event.inputs.environment }}
         run: |
           terraform apply -auto-approve \
-            -var="db_password=${{secrets.DB_PASSWORD}}"
+            -var="db_password=${{ secrets.DB_PASSWORD }}"
         continue-on-error: true
 
       - name: Bilan du job apply
@@ -180,10 +253,10 @@ jobs:
     name: destroy ${{ github.event.inputs.environment }}
     runs-on: ubuntu-latest
     if: github.event.inputs.action == 'destroy'
+
     permissions:
       id-token: write
       contents: read
-
 
     environment:
       name: ${{ github.event.inputs.environment }}
@@ -197,13 +270,23 @@ jobs:
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
+      - name: 🔍 Debug OIDC (sub)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const token = await core.getIDToken('sts.amazonaws.com');
+            const c = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString());
+            core.info(`sub reçu : ${c.sub}`);
+            core.info(`aud      : ${c.aud}`);
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          # aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          # aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN}}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
+
+      - name: ✅ Vérifier l'identité AWS
+        run: aws sts get-caller-identity
 
       - name: Terraform Init
         working-directory: environments/${{ github.event.inputs.environment }}
@@ -214,7 +297,7 @@ jobs:
         working-directory: environments/${{ github.event.inputs.environment }}
         run: |
           terraform destroy -auto-approve \
-            -var="db_password=${{secrets.DB_PASSWORD}}"
+            -var="db_password=${{ secrets.DB_PASSWORD }}"
         continue-on-error: true
 
       - name: Bilan du job destroy
