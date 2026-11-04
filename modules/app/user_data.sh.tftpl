@@ -1,0 +1,59 @@
+#!/bin/bash
+# =====================================================================
+# Démarrage d'une instance Yoon (exécuté une seule fois par cloud-init).
+# Généré par Terraform depuis modules/app/user_data.sh.tftpl.
+# Journal complet sur l'instance : /var/log/yoon-init.log
+# =====================================================================
+set -euxo pipefail
+exec > >(tee -a /var/log/yoon-init.log) 2>&1
+
+# --- Mémoire d'appoint : 1 Go de swap (une t3.micro n'a que 1 Go de RAM) ---
+if [ ! -f /swapfile ]; then
+  fallocate -l 1G /swapfile
+  chmod 600 /swapfile
+  mkswap /swapfile
+  swapon /swapfile
+  echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
+
+# --- Docker ---
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -y
+apt-get install -y docker.io unzip curl
+systemctl enable --now docker
+
+# --- AWS CLI v2 (lecture des paramètres SSM, connexion à ECR) ---
+if ! command -v aws > /dev/null; then
+  curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+  unzip -q /tmp/awscliv2.zip -d /tmp
+  /tmp/aws/install
+  rm -rf /tmp/aws /tmp/awscliv2.zip
+fi
+
+# --- Agent SSM (préinstallé sur les AMI Ubuntu ; installé sinon) ---
+if ! snap list amazon-ssm-agent > /dev/null 2>&1; then
+  snap install amazon-ssm-agent --classic
+fi
+systemctl enable --now snap.amazon-ssm-agent.amazon-ssm-agent.service || true
+
+# --- Configuration de l'instance ---
+mkdir -p /opt/yoon
+cat > /opt/yoon/instance.env <<'YOON_ENV'
+ENV=${env}
+REGION=${region}
+REGISTRY=${registry}
+API_REPO=${api_repository}
+WEB_REPO=${web_repository}
+INSTANCE_ROLE=${instance_role}
+YOON_ENV
+
+# --- Script de déploiement (modules/app/deploy.sh) ---
+cat > /opt/yoon/deploy.sh <<'YOON_DEPLOY'
+${deploy_script}
+YOON_DEPLOY
+chmod 700 /opt/yoon/deploy.sh
+
+# --- Premier lancement ---
+# Si les images ne sont pas encore dans ECR, le démarrage continue :
+# le premier déploiement depuis GitHub Actions lancera les conteneurs.
+/opt/yoon/deploy.sh all ${image_tag} || echo "Premier lancement impossible : voir les lignes ci-dessus."
