@@ -1,0 +1,4 @@
+# Scripts ex?cut?s sur Linux (EC2) : toujours en fins de ligne Unix (LF),
+# m?me extraits sur Windows. Sinon bash ?choue ? cause des caract?res \r.
+*.sh     text eol=lf
+*.tftpl  text eol=lf
