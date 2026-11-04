@@ -53,6 +53,17 @@ ${deploy_script}
 YOON_DEPLOY
 chmod 700 /opt/yoon/deploy.sh
 
+# --- Attente de la configuration ---
+# Les paramètres SSM dépendent de la base RDS, parfois créée après l'instance.
+# On attend leur présence (jusqu'à 20 minutes) avant le premier lancement.
+for _ in $(seq 1 120); do
+  if aws ssm get-parameter --region ${region} --name /yoon/${env}/db_url > /dev/null 2>&1; then
+    break
+  fi
+  echo "Paramètres /yoon/${env} pas encore disponibles, nouvel essai dans 10 s"
+  sleep 10
+done
+
 # --- Premier lancement ---
 # Si les images ne sont pas encore dans ECR, le démarrage continue :
 # le premier déploiement depuis GitHub Actions lancera les conteneurs.
