@@ -95,6 +95,10 @@ module "ec2-1" {
   user_data            = module.app.user_data["primary"]
   iam_instance_profile = module.app.instance_profile_name
   instance_name        = "ec2-1-${var.project_name}-${var.env}"
+
+  # Crée l'instance seulement quand toute la configuration de l'application
+  # existe (paramètres SSM, qui dépendent eux-mêmes de la base RDS).
+  depends_on = [module.app]
 }
 
 
@@ -123,6 +127,10 @@ module "ec2-2" {
   user_data            = module.app.user_data["secondary"]
   iam_instance_profile = module.app.instance_profile_name
   instance_name        = "ec2-2-${var.project_name}-${var.env}"
+
+  # Crée l'instance seulement quand toute la configuration de l'application
+  # existe (paramètres SSM, qui dépendent eux-mêmes de la base RDS).
+  depends_on = [module.app]
 }
 
 
