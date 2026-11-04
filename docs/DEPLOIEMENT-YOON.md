@@ -389,6 +389,43 @@ Par la pipeline, comme les autres changements d'infrastructure :
 
 Durée indicative : 10 à 15 minutes (RDS est le plus long), puis 3 à 5 minutes de démarrage des instances.
 
+### Premier apply (04/11/2026) et correctif
+
+Premier `apply dev` : `49 added, 0 changed, 0 destroyed`.
+Adresse : `http://alb-moustapha-dev-755009444.eu-west-3.elb.amazonaws.com`.
+
+**Problème constaté** : les EC2 ont été créées avant la fin de RDS (5 min 38 s),
+donc avant les paramètres SSM qui en dépendent. Au premier démarrage, `deploy.sh` n'a pas trouvé
+`/yoon/dev/db_url` et les conteneurs n'ont pas été lancés.
+
+**Rattrapage** : relancer `deploy.sh` par SSM Run Command, instance primary d'abord
+(voir [Relancer le déploiement à distance](#relancer-le-déploiement-à-distance)).
+
+**Correctif** (même PR) :
+
+- `environments/*/main.tf` : `depends_on = [module.app]` sur les deux EC2, qui ne sont créées
+  qu'une fois tous les paramètres présents ;
+- `modules/app/user_data.sh.tftpl` : attente des paramètres SSM (jusqu'à 20 minutes) avant le premier lancement.
+
+Le user data ayant changé, le prochain `apply` **recrée les deux instances** (`user_data_replace_on_change`).
+
+### Relancer le déploiement à distance
+
+Depuis un poste disposant des droits SSM (ici avec PowerShell) :
+
+```powershell
+# 1. EC2-1 (primary) : crée le schéma de la base et les données de démonstration
+$cmd = aws ssm send-command --region eu-west-3 --document-name AWS-RunShellScript `
+  --instance-ids <id-ec2-1> --parameters 'commands=/opt/yoon/deploy.sh all latest' `
+  --timeout-seconds 900 --query "Command.CommandId" --output text
+
+# 2. Suivre le résultat (Status = Success attendu, après 1 à 3 minutes)
+aws ssm get-command-invocation --region eu-west-3 --command-id $cmd --instance-id <id-ec2-1> `
+  --query "[Status, StandardOutputContent]" --output text
+
+# 3. Même chose pour EC2-2 (secondary)
+```
+
 ### Vérification
 
 ```powershell
