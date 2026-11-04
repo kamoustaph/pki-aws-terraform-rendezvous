@@ -65,3 +65,10 @@ output "public_subnet_ids" {
   value       = module.vpc.public_subnet_ids
   description = "Identifiants des sous-reseaux publics."
 }
+
+
+# Préfixe des paramètres de l'application dans SSM Parameter Store.
+output "app_ssm_prefix" {
+  value       = module.app.ssm_prefix
+  description = "Prefixe des parametres SSM de Yoon pour cet environnement."
+}

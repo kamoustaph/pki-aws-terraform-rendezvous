@@ -133,6 +133,26 @@ Il vise un premier laboratoire avec accès public pour l'administration.
 La configuration du fournisseur AWS et la valeur réelle de l'AMI
 restent à fournir.
 
+
+
+## Options ajoutées pour l'application Yoon
+
+Ces variables sont toutes optionnelles : un appel existant du module reste valide sans changement.
+
+| Variable | Type | Défaut | Description |
+|---|---|---|---|
+| `iam_instance_profile` | string | `null` | Profil IAM attaché à l'instance (fourni par le module [`app`](../app/README.md)) |
+| `root_volume_size` | number | `16` | Taille du disque système en Go (gp3, chiffré) |
+| `instance_name` | string | `null` | Tag `Name` ; `null` conserve `ec2-<projet>-<env>` |
+
+Comportements ajoutés dans `main.tf` :
+
+- `user_data_replace_on_change = true` : si le script de démarrage change, l'instance est recréée
+  (le user data n'est exécuté qu'au premier démarrage).
+- `metadata_options` : IMDSv2 obligatoire, ce qui protège les identifiants du rôle IAM contre les requêtes falsifiées.
+- `root_block_device` : disque gp3 chiffré, de taille `root_volume_size`.
+
+
 ## Sorties
 
 | Sortie | Description |

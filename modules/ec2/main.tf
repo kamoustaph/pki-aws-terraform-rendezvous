@@ -28,8 +28,31 @@ resource "aws_instance" "vm_instance" {
 
   user_data = var.user_data != "" ? var.user_data : null
 
+  # Le user data n'est exécuté qu'au premier démarrage.
+  # Si le script change, l'instance est recréée pour qu'il s'applique.
+  user_data_replace_on_change = true
+
+  # Profil IAM de l'instance (rôle lu par les commandes AWS exécutées sur la machine).
+  # null : aucun rôle, comportement d'origine du module.
+  iam_instance_profile = var.iam_instance_profile
+
+  # Exige IMDSv2 (jeton de session) pour lire les identifiants du rôle :
+  # protège contre le vol d'identifiants par requête falsifiée (SSRF).
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 2
+  }
+
+  # Disque système : place pour Docker et les images de l'application.
+  root_block_device {
+    volume_size = var.root_volume_size
+    volume_type = "gp3"
+    encrypted   = true
+  }
+
   tags = {
-    Name        = "ec2-${var.project_name}-${var.env}"
+    Name        = var.instance_name != null ? var.instance_name : "ec2-${var.project_name}-${var.env}"
     Environment = var.env
     Project     = var.project_name
   }

@@ -14,6 +14,12 @@ terraform {
       # le fichier .terraform.lock.hcl.
       version = "~> 5.0"
     }
+
+    # Génère les clés secrètes de l'application Yoon (module app).
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.6"
+    }
   }
 
   # Version minimale de Terraform acceptée par cette configuration.
@@ -84,27 +90,11 @@ module "ec2-1" {
   project_name = var.project_name
   env          = var.env
 
-  # Script transmis à EC2 pour l'initialisation de l'instance.
-  # Sur cette AMI Ubuntu, cloud-init l'exécute habituellement
-  # au premier démarrage.
-  #
-  # <<-EOF permet d'écrire un texte sur plusieurs lignes.
-  # Terraform remplace ${var.env} avant de transmettre le script.
-  #
-  # Commandes :
-  # - actualiser la liste des paquets ;
-  # - installer Nginx ;
-  # - écrire la page de test ;
-  # - démarrer Nginx ;
-  # - activer son démarrage automatique.
-  user_data = <<-EOF
-    #!/bin/bash
-    apt update -y
-    apt install -y nginx
-    echo "<h1>Bienvenue sur l'instance EC2-1-${var.env}</h1>" > /var/www/html/index.html
-    systemctl start nginx
-    systemctl enable nginx
-  EOF
+  # Application Yoon : Docker + conteneurs api et web (module app).
+  # « primary » : cette instance peut créer les données de démonstration.
+  user_data            = module.app.user_data["primary"]
+  iam_instance_profile = module.app.instance_profile_name
+  instance_name        = "ec2-1-${var.project_name}-${var.env}"
 }
 
 
@@ -128,16 +118,36 @@ module "ec2-2" {
   project_name = var.project_name
   env          = var.env
 
-  # Même installation que sur EC2-1, avec une page différente
-  # pour identifier le serveur qui répond.
-  user_data = <<-EOF
-    #!/bin/bash
-    apt update -y
-    apt install -y nginx
-    echo "<h1>Bienvenue sur l'instance EC2-2-${var.env}</h1>" > /var/www/html/index.html
-    systemctl start nginx
-    systemctl enable nginx
-  EOF
+  # Application Yoon : Docker + conteneurs api et web (module app).
+  # « secondary » : jamais de données de démonstration (évite une double insertion).
+  user_data            = module.app.user_data["secondary"]
+  iam_instance_profile = module.app.instance_profile_name
+  instance_name        = "ec2-2-${var.project_name}-${var.env}"
+}
+
+
+# ---------------------------------------------------------
+# Application Yoon : secrets SSM, rôle IAM et démarrage des EC2
+# ---------------------------------------------------------
+
+module "app" {
+  source = "../../modules/app"
+
+  project_name = var.project_name
+  env          = var.env
+  region       = var.region
+
+  # Connexion de l'API à la base.
+  # L'adresse RDS crée une dépendance : les instances démarrent
+  # après la création de la base.
+  db_host     = module.rds.rds_address
+  db_port     = module.rds.rds_port
+  db_name     = var.db_name
+  db_username = var.db_username
+  db_password = var.db_password
+
+  # Comptes et départs de démonstration au premier démarrage (dev uniquement).
+  demo_data = var.demo_data
 }
 
 

@@ -102,3 +102,33 @@ variable "user_data" {
   type        = string
   description = "Script d'initialisation de l'instance EC2."
 }
+
+
+# ---------------------------------------------------------
+# Variables ajoutées pour le déploiement de Yoon
+# Toutes ont une valeur par défaut : les appels existants
+# du module restent valides sans modification.
+# ---------------------------------------------------------
+
+# Profil d'instance IAM attaché à l'EC2.
+# null : aucun rôle (comportement d'origine).
+variable "iam_instance_profile" {
+  type        = string
+  description = "Nom du profil d'instance IAM ; null pour aucun."
+  default     = null
+}
+
+# Taille du disque système en Go.
+variable "root_volume_size" {
+  type        = number
+  description = "Taille du disque systeme en Go."
+  default     = 16
+}
+
+# Nom affiché dans la console (tag Name).
+# null : nom d'origine ec2-<projet>-<env>.
+variable "instance_name" {
+  type        = string
+  description = "Tag Name de l'instance ; null pour le nom par defaut."
+  default     = null
+}

@@ -109,3 +109,13 @@ variable "allowed_ssh_cidr" {
   description = "Plages IPv4 autorisees a se connecter en SSH."
   default     = []
 }
+
+
+# Données de démonstration de Yoon (comptes admin, agent, voyageur et départs)
+# créées au premier démarrage si la base est vide.
+# false en staging : aucune donnée fictive hors du développement.
+variable "demo_data" {
+  type        = bool
+  description = "Cree les donnees de demonstration de Yoon si la base est vide."
+  default     = false
+}

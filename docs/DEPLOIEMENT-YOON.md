@@ -9,8 +9,8 @@ Il complète le [README principal](../README.md), qui documente l'infrastructure
 | Étape | Contenu | État |
 |---|---|---|
 | [1. Registres d'images et rôle de déploiement](#étape-1--registres-dimages-et-rôle-de-déploiement) | ECR, rôle IAM des dépôts d'application, droits de la pipeline | ✅ Appliquée le 03/11/2026 |
-| [2. Publication des images dans ECR](#étape-2--publication-des-images-dans-ecr) | Workflows des dépôts backend et frontend | ⏳ À venir |
-| [3. Serveurs prêts pour Docker](#étape-3--serveurs-prêts-pour-docker) | Rôle des EC2, secrets SSM, user data Docker | ⏳ À venir |
+| [2. Publication des images dans ECR](#étape-2--publication-des-images-dans-ecr) | Workflows des dépôts backend et frontend | ✅ Réalisée le 04/11/2026 |
+| [3. Serveurs prêts pour Docker](#étape-3--serveurs-prêts-pour-docker) | Rôle des EC2, secrets SSM, user data Docker | 🔄 Prête à appliquer en dev |
 | [4. Déploiement continu et HTTPS](#étape-4--déploiement-continu-et-https) | Mise à jour automatique des EC2, certificat sur l'ALB | ⏳ À venir |
 
 ## Sommaire
@@ -221,26 +221,198 @@ Settings → Secrets and variables → Actions → New repository secret.
 
 ## Étape 2 : publication des images dans ECR
 
-**État : à venir.**
+**État : réalisée le 04/11/2026** (PR #2 de chaque dépôt d'application).
 
-Objectif : à chaque push sur `main`, les workflows des dépôts d'application poussent leur image
-dans ECR (au lieu de GitHub Container Registry), avec deux tags : le SHA du commit et `latest`.
-Cette étape précède la création des serveurs, pour que les EC2 trouvent les images dès leur premier démarrage.
+À chaque push sur `main`, le workflow `.github/workflows/ci.yml` de chaque dépôt d'application :
 
-*Section complétée lors de la réalisation de l'étape.*
+1. lance les tests (backend) ou le build de production (frontend) ;
+2. s'authentifie auprès d'AWS par OIDC avec `yoon-app-deploy-role` ;
+3. construit l'image Docker et la pousse dans ECR avec deux tags : le SHA du commit et `latest`.
+
+```mermaid
+flowchart LR
+    PR["Pull request"] --> T["Tests / Build"]
+    M["Push sur main<br/>ou Run workflow"] --> T2["Tests / Build"] --> I["Image vers ECR<br/>(OIDC)"] --> E[("ECR<br/>:sha + :latest")]
+```
+
+| Événement | Tests / Build | Image vers ECR |
+|---|---|---|
+| Pull request | ✅ exécuté | ⏭️ ignoré (le rôle AWS n'accepte que `main`) |
+| Push sur `main` | ✅ exécuté | ✅ exécuté |
+| Run workflow (manuel, sur `main`) | ✅ exécuté | ✅ exécuté |
+
+### Fichiers modifiés
+
+| Dépôt | Fichier | Changement |
+|---|---|---|
+| GestionVoyageBakend | `.github/workflows/ci.yml` | publication vers ECR `gestion-voyage-api` (au lieu de GitHub Container Registry) |
+| GestionVoyageFrontend | `.github/workflows/ci.yml` | publication vers ECR `gestion-voyage-web` |
+| GestionVoyageFrontend | `nginx/default.conf.template` | transmet au backend le protocole d'origine (`X-Forwarded-Proto`) reçu de l'ALB, nécessaire au passage en HTTPS |
+
+### Résultat
+
+```text
+gestion-voyage-api : latest, 4adbdfa878ec26c431f63b09d8984f366e31d10e
+gestion-voyage-web : latest, fe2215a… (SHA complet du commit de fusion de la PR #2)
+```
+
+### Vérification
+
+```powershell
+aws ecr describe-images --region eu-west-3 --repository-name gestion-voyage-api --query "imageDetails[].imageTags"
+aws ecr describe-images --region eu-west-3 --repository-name gestion-voyage-web --query "imageDetails[].imageTags"
+```
+
+### Points d'attention rencontrés
+
+- Le job **Image vers ECR** est *skipped* sur une pull request : c'est voulu. L'image n'est publiée qu'après la fusion.
+- Le secret `AWS_DEPLOY_ROLE_ARN` doit exister **avant** la fusion. S'il manquait, relancer le job depuis
+  Actions → le run → *Re-run failed jobs*, ou Actions → *Run workflow* sur `main`.
+- Relancer le run d'une pull request ne publie pas d'image : il faut un run sur `main`.
 
 ## Étape 3 : serveurs prêts pour Docker
 
-**État : à venir.**
+**État : prête à appliquer en dev** (code identique dans les trois environnements).
 
-Prévu :
+Les instances EC2 n'installent plus nginx en dur : au premier démarrage, elles installent Docker,
+lisent leurs secrets dans SSM, tirent les images depuis ECR et lancent les conteneurs `api` et `web`.
 
-- module `ec2` : profil d'instance IAM (lecture ECR, lecture des paramètres SSM, agent SSM) ;
-- paramètres SSM `SecureString` pour le mot de passe de la base et les clés `JWT_SECRET` et `QR_SECRET` ;
-- user data : installation de Docker, puis lancement des conteneurs `web` et `api` ;
-- application d'abord en **dev** via la pipeline, puis staging et prod.
+```mermaid
+sequenceDiagram
+    participant TF as terraform apply (dev)
+    participant RDS as RDS MySQL
+    participant SSM as SSM Parameter Store
+    participant EC2 as EC2 (cloud-init)
+    participant ECR as ECR
+    TF->>RDS: création de la base
+    TF->>SSM: /yoon/dev/* (secrets et paramètres)
+    TF->>EC2: création avec profil IAM + user data
+    EC2->>EC2: swap 1 Go, Docker, AWS CLI, agent SSM
+    EC2->>SSM: lecture des paramètres
+    EC2->>ECR: docker pull api et web (:latest)
+    EC2->>EC2: lancement api, attente « UP », puis web
+    Note over EC2: l'ALB voit le port 80 répondre : cible saine
+```
 
-*Section complétée lors de la réalisation de l'étape.*
+### Fichiers
+
+| Fichier | Statut | Contenu |
+|---|---|---|
+| `modules/app/versions.tf` | nouveau | providers `aws` et `random` |
+| `modules/app/variables.tf` | nouveau | entrées du module (base, images, données de démo, mémoire JVM) |
+| `modules/app/main.tf` | nouveau | paramètres SSM, rôle et profil IAM des EC2, rendu du user data |
+| `modules/app/outputs.tf` | nouveau | profil IAM, user data, préfixe SSM, registre ECR |
+| `modules/app/user_data.sh.tftpl` | nouveau | script de premier démarrage |
+| `modules/app/deploy.sh` | nouveau | script de (re)déploiement copié sur chaque instance |
+| `modules/ec2/main.tf` | modifié | `iam_instance_profile`, `user_data_replace_on_change`, IMDSv2 obligatoire, disque gp3 chiffré |
+| `modules/ec2/variables.tf` | modifié | `iam_instance_profile`, `root_volume_size` (16 Go), `instance_name` ; tous optionnels |
+| `modules/app/README.md` | nouveau | documentation du module (entrées, sorties, paramètres, rôle) |
+| `modules/ec2/README.md` | complété | section « Options ajoutées pour l'application Yoon » |
+| `environments/{dev,staging,prod}/main.tf` | modifié | appel du module `app` ; les deux EC2 utilisent son user data et son profil |
+| `environments/{dev,staging,prod}/variables.tf` | modifié | `demo_data` : `true` en dev, `false` en staging et prod |
+| `environments/{dev,staging,prod}/outputs.tf` | modifié | sortie `app_ssm_prefix` |
+
+Les trois environnements gardent un code identique ; seule la valeur par défaut de `demo_data` diffère.
+Seul **dev** est appliqué à cette étape. Staging et prod le seront plus tard, avec leur propre `terraform.tfvars`
+(qui doit définir `env = "staging"` ou `env = "prod"` : les paramètres SSM et les rôles IAM sont nommés d'après `env`).
+
+### Paramètres SSM créés
+
+| Paramètre | Type | Origine |
+|---|---|---|
+| `/yoon/dev/db_password` | SecureString | variable `db_password` (secret GitHub `DB_PASSWORD`) |
+| `/yoon/dev/jwt_secret` | SecureString | généré par Terraform (64 caractères) |
+| `/yoon/dev/qr_secret` | SecureString | généré par Terraform (48 caractères). **Le changer invalide tous les billets émis.** |
+| `/yoon/dev/db_url` | String | `jdbc:mysql://<adresse RDS>:3306/moustaphadb?sslMode=PREFERRED` |
+| `/yoon/dev/db_username` | String | variable `db_username` |
+| `/yoon/dev/demo_data` | String | variable `demo_data` |
+| `/yoon/dev/cors_allowed_origins` | String | `none` : inutile, le site et l'API partagent le domaine de l'ALB |
+| `/yoon/dev/java_max_heap` | String | `384m`, adapté à une t3.micro |
+
+Les valeurs sont aussi présentes dans le state Terraform (bucket S3 chiffré, accès privé).
+
+### Rôle IAM des instances (`yoon-dev-ec2-role`)
+
+| Permission | Pourquoi |
+|---|---|
+| `AmazonSSMManagedInstanceCore` | recevoir les commandes de déploiement ; se connecter par Session Manager sans SSH |
+| `AmazonEC2ContainerRegistryReadOnly` | `docker pull` depuis ECR |
+| `ssm:GetParameter*` sur `/yoon/dev/*` | lire **uniquement** les paramètres de son environnement |
+| `kms:Decrypt` via SSM | déchiffrer les SecureString |
+
+### Sur chaque instance
+
+| Élément | Emplacement |
+|---|---|
+| Journal du premier démarrage | `/var/log/yoon-init.log` |
+| Identité de l'instance (env, région, registre, rôle) | `/opt/yoon/instance.env` |
+| Script de déploiement | `/opt/yoon/deploy.sh` |
+| Variables de l'API (générées, droits 600) | `/opt/yoon/api.env` |
+| Tags actuellement déployés | `/opt/yoon/api.tag`, `/opt/yoon/web.tag` |
+
+| Conteneur | Image | Réseau | Mémoire max |
+|---|---|---|---|
+| `api` | `gestion-voyage-api:<tag>` | réseau Docker `yoon`, port 8093 non exposé | 640 Mo (JVM `-Xmx384m`) |
+| `web` | `gestion-voyage-web:<tag>` | port 80 de l'instance (cible de l'ALB) | 128 Mo |
+
+Utilisation de `deploy.sh` :
+
+```bash
+sudo /opt/yoon/deploy.sh                 # api + web, tag latest
+sudo /opt/yoon/deploy.sh all  <sha>      # api + web à une version précise
+sudo /opt/yoon/deploy.sh api  <sha>      # API seule (nginx redémarré ensuite)
+sudo /opt/yoon/deploy.sh web  <sha>      # frontend seul
+```
+
+Les secrets sont relus dans SSM à chaque exécution : modifier un paramètre puis relancer `deploy.sh` suffit.
+
+### Données de démonstration
+
+EC2-1 reçoit le user data « primary » : il peut créer les comptes et départs de démonstration si la base est vide.
+EC2-2 reçoit « secondary » : jamais. Cela évite deux insertions simultanées dans la même base.
+
+| Rôle | Email | Mot de passe |
+|---|---|---|
+| Administrateur | admin@yoon.sn | Admin123! |
+| Agent de contrôle | agent@yoon.sn | Agent123! |
+| Voyageur | voyageur@yoon.sn | Voyageur123! |
+
+En staging et prod, `demo_data` doit valoir `false`.
+
+### Application
+
+Par la pipeline, comme les autres changements d'infrastructure :
+
+1. Pull request : le `plan dev` doit montrer la création des ressources du module `app`
+   et des instances avec leur nouveau user data, sans erreur.
+2. Fusion, puis Actions → Terraform CI/CD → *Run workflow* : `apply`, environnement `dev`.
+
+Durée indicative : 10 à 15 minutes (RDS est le plus long), puis 3 à 5 minutes de démarrage des instances.
+
+### Vérification
+
+```powershell
+terraform -chdir=environments/dev output load_balancer_url
+```
+
+Ouvrir l'URL : la page d'accueil Yoon s'affiche avec le tableau des prochains départs.
+
+```powershell
+# Les deux cibles de l'ALB doivent être « healthy »
+$tg = aws elbv2 describe-target-groups --region eu-west-3 --names tg-moustapha-dev --query "TargetGroups[0].TargetGroupArn" --output text
+aws elbv2 describe-target-health --region eu-west-3 --target-group-arn $tg --query "TargetHealthDescriptions[].TargetHealth.State"
+
+# Les instances doivent être visibles par SSM
+aws ssm describe-instance-information --region eu-west-3 --query "InstanceInformationList[].[InstanceId,PingStatus]"
+```
+
+En cas de problème sur une instance : console EC2 → instance → **Se connecter** → **Session Manager**, puis :
+
+```bash
+sudo tail -n 100 /var/log/yoon-init.log
+sudo docker ps
+sudo docker logs --tail 100 api
+```
 
 ## Étape 4 : déploiement continu et HTTPS
 
@@ -248,7 +420,8 @@ Prévu :
 
 Prévu :
 
-- après publication de l'image, mise à jour des EC2 **une par une** via SSM, pour éviter une interruption ;
+- après publication de l'image, appel de `/opt/yoon/deploy.sh` sur les EC2 **une par une** via SSM Run Command,
+  pour éviter une interruption ;
 - certificat ACM et écouteur 443 sur l'ALB. HTTPS est obligatoire pour la caméra du scanner de billets.
 
 *Section complétée lors de la réalisation de l'étape.*
@@ -264,7 +437,7 @@ Aucun secret n'est écrit dans le code ni dans les fichiers `.tfvars` versionné
 | `AWS_ROLE_ARN` | secret du dépôt Terraform | pipeline Terraform (`github-actions-role`) | existant |
 | `DB_PASSWORD` | secret du dépôt Terraform | `terraform plan/apply` (mot de passe RDS) | existant |
 | `AWS_DEPLOY_ROLE_ARN` | secret des dépôts backend et frontend | workflows d'image et de déploiement | 1 |
-| `/yoon/<env>/…` | AWS SSM Parameter Store | conteneur `api` au démarrage | 3 (à venir) |
+| `/yoon/<env>/…` | AWS SSM Parameter Store | conteneur `api`, lu par `deploy.sh` | 3 |
 
 Fichiers qui ne doivent jamais être publiés (déjà couverts par `.gitignore`) :
 `*.tfstate`, `*.tfstate.*`, `.terraform/`, `*.pem`, `*.key`, `.env`.
@@ -307,6 +480,17 @@ Autres causes :
 
 - Le workflow doit utiliser `AWS_DEPLOY_ROLE_ARN`, pas `AWS_ROLE_ARN`.
 - Le nom du registre doit être exactement `gestion-voyage-api` ou `gestion-voyage-web`.
+
+### Cibles de l'ALB « unhealthy » après l'étape 3
+
+Le démarrage complet prend 3 à 5 minutes après la création des instances. Au-delà, se connecter par Session Manager :
+
+| Constat dans `/var/log/yoon-init.log` ou `docker` | Cause probable |
+|---|---|
+| `Premier lancement impossible` + erreur `pull` | images absentes d'ECR : refaire l'étape 2, puis `sudo /opt/yoon/deploy.sh` |
+| `AccessDenied` sur `ssm get-parameter` | profil IAM non attaché ou mauvais préfixe d'environnement |
+| conteneur `api` qui redémarre en boucle | `docker logs api` : connexion à RDS (groupe de sécurité, mot de passe) |
+| `api` prête mais `web` absent | `docker logs web` : configuration nginx |
 
 ### `terraform plan` du bootstrap propose une destruction
 
