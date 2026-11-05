@@ -226,6 +226,9 @@ module "alb" {
 
   project_name = var.project_name
   env          = var.env
+
+  # Certificat EJBCA importé dans ACM. null : HTTP seul.
+  certificate_arn = var.certificate_arn
 }
 
 

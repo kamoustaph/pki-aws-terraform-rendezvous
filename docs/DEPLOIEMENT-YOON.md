@@ -453,15 +453,27 @@ sudo docker logs --tail 100 api
 
 ## Étape 4 : déploiement continu et HTTPS
 
-**État : à venir.**
+### 4a à 4f : HTTPS avec la PKI EJBCA / SoftHSM
 
-Prévu :
+**État : code prêt, à appliquer.** Procédure complète : [`PKI-HTTPS-YOON.md`](PKI-HTTPS-YOON.md).
 
-- après publication de l'image, appel de `/opt/yoon/deploy.sh` sur les EC2 **une par une** via SSM Run Command,
-  pour éviter une interruption ;
-- certificat ACM et écouteur 443 sur l'ALB. HTTPS est obligatoire pour la caméra du scanner de billets.
+Sans nom de domaine, le certificat est émis par notre Intermediate CA pour le nom DNS de l'ALB
+(`alb-moustapha-dev-<n>.eu-west-3.elb.amazonaws.com`). Ce nom change si l'ALB est recréé :
+le certificat doit alors être réémis.
 
-*Section complétée lors de la réalisation de l'étape.*
+| Partie | Fichiers | Effet |
+|---|---|---|
+| Publication PKI | `bootstrap/pki_publication.tf`, `bootstrap/outputs_pki.tf` | bucket S3 public en lecture sur `crl/*` et `ca/*`, adresses HTTP fixes pour CDP et AIA |
+| Listener HTTPS | `modules/alb/*` | 443 avec le certificat ACM ; 80 redirige vers 443 ; inchangé si `certificate_arn = null` |
+| Environnements | `environments/{dev,staging,prod}/{main,variables,outputs}.tf` | variable `certificate_arn`, sortie `load_balancer_dns` |
+
+La clé privée du serveur est importée dans ACM par la CLI : elle n'apparaît ni dans git ni dans
+l'état Terraform.
+
+### Déploiement continu
+
+**État : à venir.** Après publication de l'image, appel de `/opt/yoon/deploy.sh` sur les EC2
+**une par une** via SSM Run Command, pour éviter une interruption.
 
 ---
 

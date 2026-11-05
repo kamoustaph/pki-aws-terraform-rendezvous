@@ -60,3 +60,26 @@ variable "subnet_ids" {
     error_message = "Fournir au moins deux sous-reseaux publics dans des zones differentes."
   }
 }
+
+
+# Certificat TLS importé dans ACM (ARN).
+#
+# null (défaut) : HTTP seul, comportement d'origine.
+# Renseigné : listener HTTPS 443 et redirection HTTP -> HTTPS.
+#
+# Le nom inscrit dans le certificat (SAN) doit correspondre au nom
+# utilisé par les visiteurs : ici le nom DNS de l'ALB, qui change
+# si l'ALB est recréé (destroy puis apply).
+variable "certificate_arn" {
+  type        = string
+  default     = null
+  description = "ARN du certificat ACM du listener HTTPS. null : HTTP seul."
+}
+
+
+# Politique TLS du listener HTTPS.
+variable "ssl_policy" {
+  type        = string
+  default     = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+  description = "Politique TLS de l'ALB (versions et suites de chiffrement)."
+}

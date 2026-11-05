@@ -108,21 +108,76 @@ resource "aws_lb_target_group_attachment" "instances" {
 # ---------------------------------------------------------
 
 # Le listener reçoit les connexions des visiteurs.
+#
+# Sans certificat (certificate_arn = null) : il transmet au groupe cible,
+# comme avant.
+# Avec certificat : il redirige tout le trafic vers HTTPS (301),
+# en conservant le chemin et les paramètres de la requête.
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn
 
-  # Entrée HTTP uniquement.
   port     = 80
   protocol = "HTTP"
 
-  # Toutes les requêtes qui arrivent sur ce listener sont
-  # transmises au groupe cible.
+  dynamic "default_action" {
+    for_each = local.https_actif ? [] : [1]
+    content {
+      type             = "forward"
+      target_group_arn = aws_lb_target_group.main.arn
+    }
+  }
+
+  dynamic "default_action" {
+    for_each = local.https_actif ? [1] : []
+    content {
+      type = "redirect"
+
+      redirect {
+        protocol    = "HTTPS"
+        port        = "443"
+        status_code = "HTTP_301"
+      }
+    }
+  }
+
+  tags = {
+    Name = "listener-http-${var.project_name}-${var.env}"
+  }
+}
+
+
+# ---------------------------------------------------------
+# 5. Listener HTTPS (optionnel)
+# ---------------------------------------------------------
+
+# Créé uniquement si un certificat ACM est fourni.
+#
+# Le certificat est émis par la PKI EJBCA / SoftHSM puis importé
+# dans ACM par la CLI : la clé privée ne passe jamais par Terraform.
+# Le TLS se termine sur l'ALB ; l'ALB parle ensuite en HTTP aux
+# instances, à l'intérieur du VPC, et ajoute X-Forwarded-Proto: https.
+locals {
+  https_actif = var.certificate_arn != null
+}
+
+resource "aws_lb_listener" "https" {
+  count = local.https_actif ? 1 : 0
+
+  load_balancer_arn = aws_lb.main.arn
+
+  port     = 443
+  protocol = "HTTPS"
+
+  # TLS 1.3 et TLS 1.2 uniquement, suites de chiffrement modernes.
+  ssl_policy      = var.ssl_policy
+  certificate_arn = var.certificate_arn
+
   default_action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.main.arn
   }
 
   tags = {
-    Name = "listener-http-${var.project_name}-${var.env}"
+    Name = "listener-https-${var.project_name}-${var.env}"
   }
 }

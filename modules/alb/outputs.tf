@@ -7,13 +7,13 @@ output "alb_dns" {
 }
 
 
-# URL HTTP correspondant au listener configuré.
+# URL de l'application : https:// si un certificat est fourni, sinon http://.
 #
 # La présence de cette URL ne garantit pas que l'application
 # soit déjà installée ou que les cibles soient opérationnelles.
 output "url_alb" {
-  value       = "http://${aws_lb.main.dns_name}"
-  description = "URL HTTP de l'application via l'ALB."
+  value       = "${local.https_actif ? "https" : "http"}://${aws_lb.main.dns_name}"
+  description = "URL de l'application via l'ALB (https si certificat_arn est fourni)."
 }
 
 
@@ -40,4 +40,11 @@ output "alb_arn" {
 output "target_group_arn" {
   value       = aws_lb_target_group.main.arn
   description = "ARN du groupe cible des instances EC2."
+}
+
+
+# Indique si le listener HTTPS est actif.
+output "https_enabled" {
+  value       = local.https_actif
+  description = "true si le listener HTTPS 443 est cree."
 }
