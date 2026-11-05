@@ -10,7 +10,8 @@ Il crée :
 - un Application Load Balancer ;
 - un groupe cible ;
 - un enregistrement par instance fournie ;
-- un listener HTTP sur le port 80.
+- un listener HTTP sur le port 80 ;
+- en option, un listener HTTPS sur le port 443 (si `certificate_arn` est fourni).
 
 Il ne crée ni les instances EC2 ni les services applicatifs.
 
@@ -27,7 +28,7 @@ le déploiement et les tests HTTP restent à confirmer.
 | Fichier | Rôle |
 |---|---|
 | `variables.tf` | Paramètres du module |
-| `main.tf` | ALB, groupe cible, enregistrements et listener |
+| `main.tf` | ALB, groupe cible, enregistrements, listeners HTTP et HTTPS |
 | `outputs.tf` | DNS, URL et identifiants |
 | `README.md` | Documentation |
 
@@ -41,6 +42,8 @@ le déploiement et les tests HTTP restent à confirmer.
 | `security_group_id` | `string` | Obligatoire | Groupe de sécurité ALB |
 | `instance_ids` | `list(string)` | Obligatoire | Identifiants des instances cibles |
 | `subnet_ids` | `list(string)` | Obligatoire | Sous-réseaux publics de l'ALB |
+| `certificate_arn` | `string` | `null` | Certificat ACM du listener HTTPS ; `null` : HTTP seul |
+| `ssl_policy` | `string` | `"ELBSecurityPolicy-TLS13-1-2-2021-06"` | Versions TLS et suites de chiffrement |
 
 Une liste vide d'instances est acceptée, mais le groupe cible
 n'aura aucune instance pour servir l'application.
@@ -207,3 +210,41 @@ Examiner également les coûts des IPv4 publiques et des transferts.
 - [ALB avec Terraform](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/lb)
 - [Application Load Balancers](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/application-load-balancers.html)
 - [Contrôles de santé des cibles](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/target-group-health-checks.html)
+
+## HTTPS (optionnel)
+
+Sans `certificate_arn`, le module se comporte exactement comme avant : un seul listener HTTP 80
+qui transmet au groupe cible.
+
+Avec `certificate_arn` :
+
+| Listener | Action |
+|---|---|
+| HTTP 80 | redirection permanente (301) vers `https://` en gardant chemin et paramètres |
+| HTTPS 443 | terminaison TLS, puis transmission au groupe cible en HTTP 80 |
+
+```hcl
+module "alb" {
+  # ...
+  certificate_arn = "arn:aws:acm:eu-west-3:231644789895:certificate/..."
+}
+```
+
+Points d'attention :
+
+- Le certificat est importé dans ACM **par la CLI**, jamais par Terraform : la clé privée ne doit pas
+  apparaître dans l'état Terraform.
+- Le nom inscrit dans le certificat (SAN) doit être celui que tapent les visiteurs. Sans domaine,
+  c'est `alb_dns`, qui **change si l'ALB est recréé** : il faut alors réémettre le certificat.
+- Le groupe de sécurité de l'ALB doit autoriser TCP 443 en entrée (règle `alb_https` du module security).
+- Les vérifications de santé ne changent pas : elles restent en HTTP sur le port des instances.
+- L'ALB ajoute `X-Forwarded-Proto: https` ; nginx (image web) le transmet à l'API.
+
+Sorties ajoutées ou modifiées :
+
+| Sortie | Valeur |
+|---|---|
+| `url_alb` | `https://<dns>` si un certificat est fourni, sinon `http://<dns>` |
+| `https_enabled` | `true` si le listener 443 existe |
+
+Procédure complète d'émission du certificat avec EJBCA : `docs/PKI-HTTPS-YOON.md`.

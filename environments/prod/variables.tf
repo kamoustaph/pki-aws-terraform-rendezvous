@@ -119,3 +119,16 @@ variable "demo_data" {
   description = "Cree les donnees de demonstration de Yoon si la base est vide."
   default     = false
 }
+
+
+# Certificat TLS de l'ALB, émis par la PKI EJBCA et importé dans ACM.
+#
+# Ce n'est pas un secret : seul l'ARN est indiqué ici, la clé privée
+# reste dans ACM. Renseigner dans terraform.tfvars :
+#   certificate_arn = "arn:aws:acm:eu-west-3:231644789895:certificate/..."
+# null : l'ALB reste en HTTP seul.
+variable "certificate_arn" {
+  type        = string
+  default     = null
+  description = "ARN du certificat ACM de l'ALB. null : HTTP seul."
+}

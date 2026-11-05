@@ -52,11 +52,18 @@ output "ec2_instances" {
 }
 
 
-# URL HTTP utilisée par les visiteurs pour joindre l'ALB.
-# Le listener actuel ne fournit pas encore HTTPS.
+# URL utilisée par les visiteurs pour joindre l'ALB :
+# https:// si certificate_arn est renseigné, sinon http://.
 output "load_balancer_url" {
   value       = module.alb.url_alb
-  description = "URL HTTP de l'application via l'ALB."
+  description = "URL de l'application via l'ALB."
+}
+
+
+# Nom DNS de l'ALB : c'est le nom à inscrire dans le SAN du certificat.
+output "load_balancer_dns" {
+  value       = module.alb.alb_dns
+  description = "Nom DNS de l'ALB, a utiliser comme SAN du certificat TLS."
 }
 
 
