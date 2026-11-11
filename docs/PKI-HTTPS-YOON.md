@@ -1,25 +1,27 @@
-# HTTPS de Yoon avec la PKI EJBCA / SoftHSM
+# HTTPS de Yoon avec la PKI EJBCA / SoftHSM : procédure
 
-Ce guide sécurise l'application Yoon en HTTPS avec **nos propres certificats**, émis par la PKI
-EJBCA (clés des CA dans SoftHSM), **sans acheter de nom de domaine** : le certificat est émis pour le
-nom DNS que AWS attribue à l'ALB.
+Ce guide sert de **procédure de référence** pour servir Yoon en HTTPS avec nos propres certificats, émis par
+EJBCA (clés des autorités dans SoftHSM), **sans nom de domaine** : le certificat porte le nom DNS de l'ALB.
+Il intègre les corrections découvertes lors de la mise en place (novembre 2026).
 
-HTTPS est indispensable pour Yoon : les navigateurs refusent l'accès à la caméra (scanner de billets)
-sur une page HTTP.
+HTTPS est indispensable : les navigateurs refusent l'accès à la caméra (scanner de billets) sur une page HTTP.
+
+Compte rendu de ce qui a été fait, avec les résultats : [`HTTPS-REALISATION-2026-11.md`](HTTPS-REALISATION-2026-11.md).
 
 ## Sommaire
 
 1. [Vue d'ensemble](#vue-densemble)
-2. [Contrainte : le nom de l'ALB](#contrainte--le-nom-de-lalb)
-3. [4a. Bucket de publication des CRL](#4a-bucket-de-publication-des-crl)
-4. [4b. Configuration EJBCA](#4b-configuration-ejbca)
-5. [4c. Certificat serveur de l'ALB](#4c-certificat-serveur-de-lalb)
-6. [4d. Import dans ACM](#4d-import-dans-acm)
-7. [4e. Listener HTTPS sur l'ALB](#4e-listener-https-sur-lalb)
-8. [4f. Confiance sur les appareils et tests](#4f-confiance-sur-les-appareils-et-tests)
-9. [Exploitation : CRL, renouvellement, révocation](#exploitation--crl-renouvellement-révocation)
-10. [Sécurité : ce qui ne doit jamais sortir](#sécurité--ce-qui-ne-doit-jamais-sortir)
-11. [Dépannage](#dépannage)
+2. [Décisions](#décisions)
+3. [Où se fait quoi](#où-se-fait-quoi)
+4. [4a. Bucket de publication](#4a-bucket-de-publication)
+5. [4b. Réglages d'EJBCA](#4b-réglages-dejbca)
+6. [4c. Clé, CSR et émission du certificat](#4c-clé-csr-et-émission-du-certificat)
+7. [4d. Import dans ACM](#4d-import-dans-acm)
+8. [4e. Listener 443](#4e-listener-443)
+9. [4f. Confiance sur les appareils et tests](#4f-confiance-sur-les-appareils-et-tests)
+10. [Exploitation](#exploitation)
+11. [Sécurité](#sécurité)
+12. [Dépannage](#dépannage)
 
 ---
 
@@ -27,444 +29,427 @@ sur une page HTTP.
 
 ```mermaid
 flowchart LR
-  subgraph PKI["PKI locale (EJBCA + SoftHSM)"]
-    ROOT["Root CA<br/>(hors ligne de préférence)"] --> INT["Intermediate CA"]
+  subgraph VM["VM Ubuntu : EJBCA + SoftHSM (Docker)"]
+    ROOT["Lab-RootCA-SoftHSM2"] --> INT["Lab-IntermediateCA-SoftHSM2"]
+    KEY["alb.key + alb.csr<br/>(OpenSSL)"]
   end
-  INT -- "émet" --> CERT["Certificat serveur<br/>SAN = nom DNS de l'ALB"]
-  INT -- "CRL" --> S3["Bucket S3 public (HTTP)<br/>crl/ et ca/"]
-  ROOT -- "CRL" --> S3
-  CERT -- "aws acm import-certificate" --> ACM["ACM"]
-  ACM --> ALB["ALB : listener 443"]
-  ALB -- "HTTP 80 (VPC)" --> EC2["EC2 : nginx + API"]
-  USER["Navigateur<br/>(Root CA installée)"] -- "HTTPS" --> ALB
-  USER -. "vérifie la révocation" .-> S3
+  INT -- "signe la CSR" --> CRT["alb.crt<br/>SAN = nom DNS de l'ALB"]
+  KEY --> CRT
+  ROOT & INT -- "CRL (CLI EJBCA + aws s3 cp)" --> S3[("S3 pki-moustapha-2026<br/>ca/ et crl/ en HTTP")]
+  CRT -- "aws acm import-certificate" --> ACM["ACM"]
+  ACM -- "certificate_arn" --> ALB["ALB :443"]
+  ALB -- "HTTP 80 dans le VPC" --> EC2["EC2 : nginx + API"]
+  NAV["Navigateur<br/>(Root installée)"] -- "HTTPS" --> ALB
+  NAV -. "révocation" .-> S3
 ```
 
 | # | Où | Quoi |
 |---|---|---|
-| 4a | Terraform `bootstrap/` | bucket S3 qui publie les CRL et certificats de CA en HTTP, à adresse fixe |
-| 4b | EJBCA | adresses CDP / AIA dans les profils, génération et publication des CRL |
-| 4c | Poste + EJBCA | clé et CSR (OpenSSL), émission du certificat serveur, vérification |
-| 4d | AWS CLI | import dans ACM, qui renvoie un ARN |
-| 4e | Terraform `modules/alb` | listener 443 et redirection 80 → 443 |
-| 4f | Appareils | installation de la Root CA, tests (cadenas, caméra) |
+| 4a | Terraform `bootstrap/` (poste) | bucket S3 qui publie CRL et certificats de CA en HTTP |
+| 4b | EJBCA (interface) | durées des CRL, adresses CDP / AIA, profils `TLS-SERVER-YOON` et `EE-TLS-YOON` |
+| 4c | VM (terminal) | clé RSA 3072 + CSR, émission par la CLI EJBCA, vérifications |
+| 4d | VM (AWS CLI) | import dans ACM |
+| 4e | Terraform `environments/dev` | `certificate_arn` → listener 443, redirection 80 → 443 |
+| 4f | Appareils | installation de la Root, tests (cadenas, caméra) |
 
-L'ordre compte : les adresses des CRL sont **inscrites dans le certificat au moment de l'émission**.
-Elles doivent donc exister (4a) et être configurées dans EJBCA (4b) avant d'émettre (4c).
+L'ordre compte : les adresses des CRL sont **inscrites dans le certificat à l'émission**. Elles doivent exister (4a)
+et être réglées dans EJBCA (4b) avant d'émettre (4c).
 
-## Contrainte : le nom de l'ALB
+## Décisions
 
-Sans domaine, le nom utilisé est celui de l'ALB, par exemple :
+| Décision | Raison |
+|---|---|
+| Le certificat porte le **nom DNS de l'ALB** | pas de domaine ; ACM importe un certificat d'une CA privée pour n'importe quel nom |
+| **Pas** de `*.eu-west-3.elb.amazonaws.com` | il couvrirait les ALB d'autres clients AWS : usurpation possible sur nos appareils |
+| CRL et certificats de CA en **HTTP** sur un bucket du **bootstrap** | adresses figées dans les certificats, donc permanentes et indépendantes de l'ALB ; la CRL est signée |
+| Clé de l'ALB créée par **OpenSSL**, importée par la **CLI** | ACM exige la clé en clair (un HSM ne la donnerait pas) ; par Terraform, elle serait dans l'état |
+| **RSA 3072** | accepté par ACM et l'ALB ; plus robuste que 2048 |
+| Émission par la **CLI EJBCA** | pas de faute de frappe sur le nom, CSR et clé restent dans la VM, réémission en une minute |
+| TLS terminé sur l'ALB | HTTP vers les EC2 dans le VPC ; l'ALB ajoute `X-Forwarded-Proto: https` |
 
+> Le nom de l'ALB **change à chaque recréation** de l'environnement. Pendant la phase HTTPS : ne pas détruire `dev`.
+> Après une recréation : refaire 4c, 4d et 4e (voir [Exploitation](#si-dev-est-recréé)).
+
+## Où se fait quoi
+
+| Poste | Rôle |
+|---|---|
+| Windows (`C:\terraform_modules_moustapha`) | Git, bootstrap Terraform, installation de la Root |
+| VM Ubuntu (VirtualBox) | EJBCA (`https://15d79debc069:18443/ejbca/adminweb/`), conteneurs `ejbca-hsm-lab-ejbca-1` et `ejbca-hsm-lab-mariadb-1`, dossiers `~/pki-yoon/ca` et `~/pki-yoon/alb`, AWS CLI (profil `moustapha-login`) |
+| GitHub Actions | `plan` sur PR, `apply` de `dev` |
+
+Variables utilisées dans la VM :
+
+```bash
+export AWS_PROFILE=moustapha-login AWS_REGION=eu-west-3 AWS_PAGER=""
+EJBCA="docker exec ejbca-hsm-lab-ejbca-1 /opt/keyfactor/bin/ejbca.sh"
+ALB=$(aws elbv2 describe-load-balancers --names alb-moustapha-dev --query "LoadBalancers[0].DNSName" --output text)
+echo "$ALB"
 ```
-alb-moustapha-dev-755009444.eu-west-3.elb.amazonaws.com
-```
 
-Ce nom n'existe que tant que **cet ALB** existe. Un `destroy` puis un `apply` de l'environnement
-crée un nouvel ALB avec un autre numéro : le certificat ne correspond plus (erreur
-`NET::ERR_CERT_COMMON_NAME_INVALID`).
-
-- Pendant la phase PKI : **ne pas détruire dev**.
-- Si l'ALB est recréé : refaire 4c, 4d et mettre à jour `certificate_arn` (4e). Les étapes 4a, 4b
-  et 4f ne sont pas à refaire.
-
-Nom actuel :
-
-```powershell
-aws elbv2 describe-load-balancers --region eu-west-3 --names alb-moustapha-dev --query "LoadBalancers[0].DNSName" --output text
-```
-
-> **Pourquoi pas un certificat `*.eu-west-3.elb.amazonaws.com` ?**
-> Il serait valable pour **tous** les ALB de la région, y compris ceux d'autres clients AWS. Sur un
-> appareil qui fait confiance à notre Root CA, quiconque obtiendrait ce certificat et sa clé pourrait
-> usurper n'importe lequel de ces sites. Un certificat ne doit couvrir que les noms que l'on contrôle.
-
-Le jour où un domaine est acheté (par exemple `yoon.sn`), seul le SAN change : on émet un certificat
-pour `yoon.sn` / `www.yoon.sn`, on ajoute un enregistrement DNS vers l'ALB, et toute la chaîne
-ci-dessous reste valable.
+Connexion AWS dans la VM : `aws login --profile moustapha-login --region eu-west-3 --remote`, ouvrir l'URL dans
+Firefox **de la VM**, se connecter, cliquer **Copy verification code** et coller ce code (pas le mot de passe).
 
 ---
 
-## 4a. Bucket de publication des CRL
+## 4a. Bucket de publication
 
-### Pourquoi
-
-Un certificat indique où télécharger :
-
-- la **CRL** (liste des certificats révoqués), extension *CRL Distribution Points* (CDP) ;
-- le **certificat de l'autorité émettrice**, extension *Authority Information Access* (AIA).
-
-Ces adresses doivent être :
-
-- en **HTTP** et non HTTPS : vérifier la révocation d'un certificat HTTPS ne doit pas dépendre d'un
-  autre certificat HTTPS (boucle) ; les CRL sont signées, leur intégrité ne dépend pas du transport ;
-- **permanentes** : elles sont figées dans chaque certificat émis.
-
-D'où un bucket dans le **bootstrap** (jamais détruit avec les environnements), indépendant de l'ALB.
-
-### Fichiers
-
-| Fichier | Rôle |
-|---|---|
-| `bootstrap/pki_publication.tf` | bucket, versionnage, chiffrement, lecture publique de `crl/*` et `ca/*` uniquement |
-| `bootstrap/outputs_pki.tf` | sortie `pki_publication` : les quatre adresses à saisir dans EJBCA |
-
-Le nom du bucket (`pki-moustapha-2026`) doit être unique au monde. Si AWS répond
-`BucketAlreadyExists`, changer `local.pki_bucket` **avant** d'émettre le moindre certificat.
-
-### Commandes
-
-Le bootstrap a un état **local** : lancer depuis le poste qui le détient.
+Fichiers : `bootstrap/pki_publication.tf` (bucket `pki-moustapha-2026`, versionné, AES256, ACL bloquées, lecture
+publique de `crl/*` et `ca/*` uniquement) et `bootstrap/outputs_pki.tf`.
 
 ```powershell
 cd C:\terraform_modules_moustapha\bootstrap
-terraform plan     # attendu : 5 to add (bucket, versionnage, chiffrement, blocage public, politique), 0 to change, 0 to destroy
+terraform plan      # 5 to add, 0 to change, 0 to destroy
 terraform apply
 terraform output pki_publication
 ```
 
-Résultat attendu :
+| Sortie | Adresse | Inscrite dans |
+|---|---|---|
+| `root_crl_cdp` | `http://pki-moustapha-2026.s3.eu-west-3.amazonaws.com/crl/root-ca.crl` | certificats émis par la Root |
+| `root_cert_aia` | `http://pki-moustapha-2026.s3.eu-west-3.amazonaws.com/ca/root-ca.crt` | idem |
+| `intermediate_crl_cdp` | `http://pki-moustapha-2026.s3.eu-west-3.amazonaws.com/crl/intermediate-ca.crl` | certificats émis par l'Intermediate |
+| `intermediate_cert_aia` | `http://pki-moustapha-2026.s3.eu-west-3.amazonaws.com/ca/intermediate-ca.crt` | idem |
 
-```
-{
-  "bucket"                = "pki-moustapha-2026"
-  "intermediate_cert_aia" = "http://pki-moustapha-2026.s3.eu-west-3.amazonaws.com/ca/intermediate-ca.crt"
-  "intermediate_crl_cdp"  = "http://pki-moustapha-2026.s3.eu-west-3.amazonaws.com/crl/intermediate-ca.crl"
-  "root_cert_aia"         = "http://pki-moustapha-2026.s3.eu-west-3.amazonaws.com/ca/root-ca.crt"
-  "root_crl_cdp"          = "http://pki-moustapha-2026.s3.eu-west-3.amazonaws.com/crl/root-ca.crl"
-}
-```
-
-Si `apply` échoue avec `AccessDenied ... public policies are blocked by the BlockPublicPolicy`,
-le blocage d'accès public est activé **au niveau du compte** : S3 → *Block Public Access settings for
-this account* → décocher uniquement les deux options « policies » (les ACL restent bloquées),
-puis relancer `apply`.
+Vérification : `curl.exe -sI http://pki-moustapha-2026.s3.eu-west-3.amazonaws.com/` → **403** (listage interdit).
 
 ---
 
-## 4b. Configuration EJBCA
+## 4b. Réglages d'EJBCA
 
-Dans l'interface d'administration EJBCA (`https://<ejbca>:8443/ejbca/adminweb/`).
+### Les CA (*CA Functions → Certification Authorities → Edit CA*)
 
-### Publier les certificats des CA
+| Champ | Root `Lab-RootCA-SoftHSM2` | Intermediate `Lab-IntermediateCA-SoftHSM2` |
+|---|---|---|
+| CRL Expire Period | `30d` | `7d` |
+| CRL Issue Interval | `0m` | `1d` |
+| CRL Overlap Time | `1d` | `1d` |
+| Generate CRL Upon Revocation | ☑ | ☑ |
+| Default CRL Distribution Point | `…/crl/root-ca.crl` | `…/crl/intermediate-ca.crl` |
+| Default CRL Issuer | **vide** | **vide** |
+| CA issuer Default URI | `…/ca/root-ca.crt` | `…/ca/intermediate-ca.crt` |
 
-**CA Functions → CA Certificates and CRLs** : télécharger les certificats de la Root et de
-l'Intermediate au format **DER**, puis :
+Cliquer **Save** tout en bas. Ne pas toucher à *Renew CA*, *Revoke*, *Externally signed CA*,
+*Microsoft CA Compatibility Mode* (irréversible).
 
-```powershell
-aws s3 cp root-ca.der          s3://pki-moustapha-2026/ca/root-ca.crt         --content-type application/pkix-cert
-aws s3 cp intermediate-ca.der  s3://pki-moustapha-2026/ca/intermediate-ca.crt --content-type application/pkix-cert
-```
+> **Default CRL Issuer** désigne une *autre* autorité qui signerait les CRL (CRL indirectes) : il doit rester vide.
+> L'adresse du certificat de la CA va dans **CA issuer Default URI**.
 
-### Adresses CDP et AIA
+Service de mise à jour des CRL : *System Functions → Services* → `CRL Updater`, worker *CRL Updater*,
+les deux CA, intervalle 1 heure, ☑ Active. Il régénère les CRL dans EJBCA ; la copie vers S3 reste manuelle.
 
-Deux façons, au choix :
-
-- **dans la CA** (CA Functions → Certification Authorities → *Edit CA*) : *Default CRL Distribution Point*
-  et *Authority Information Access / CA issuer URI*, puis cocher *Use CA defined …* dans le profil ;
-- **dans le profil de certificat** directement (méthode retenue ci-dessous, plus lisible).
-
-| Profil | Émis par | CRL Distribution Point | AIA CA Issuer |
-|---|---|---|---|
-| Profil Sub CA (utilisé pour l'Intermediate) | Root CA | `root_crl_cdp` | `root_cert_aia` |
-| `TLS-SERVER-YOON` (nouveau) | Intermediate CA | `intermediate_crl_cdp` | `intermediate_cert_aia` |
-
-**L'Intermediate a-t-il déjà un CDP ?**
-
-```bash
-openssl x509 -in intermediate.pem -noout -text | grep -A3 "CRL Distribution\|Authority Information"
-```
-
-- Rien n'apparaît : la chaîne fonctionne quand même, mais la révocation de l'Intermediate ne peut pas
-  être vérifiée. Pour une PKI complète : ajouter les adresses au profil Sub CA, puis
-  **Edit CA → Renew CA** sur l'Intermediate (la Root le re-signe avec les nouvelles extensions).
-  Republier ensuite `intermediate-ca.crt`.
-- Une adresse apparaît déjà (autre serveur) : elle doit rester joignable, ou renouveler comme ci-dessus.
-
-### Profil de certificat `TLS-SERVER-YOON`
-
-**CA Functions → Certificate Profiles** → cloner `SERVER` sous le nom `TLS-SERVER-YOON` :
+### Profil de certificat `TLS-SERVER-YOON` (*CA Functions → Certificate Profiles*, clone de `SERVER`)
 
 | Champ | Valeur |
 |---|---|
-| Available Key Algorithms | RSA (et ECDSA si souhaité) |
-| Available Bit Lengths | 2048, 3072 (ACM accepte RSA 2048 à 4096 ; l'ALB sert RSA 2048 et ECDSA P-256/P-384) |
-| Validity | **397d** (les navigateurs refusent plus de 398 jours) |
-| Key Usage | Digital Signature, Key Encipherment ; critique |
-| Extended Key Usage | **Server Authentication** uniquement |
-| Subject Alternative Name | autorisé |
-| CRL Distribution Points | activé, URI = `intermediate_crl_cdp` |
-| Authority Information Access | activé, CA Issuer URI = `intermediate_cert_aia` (pas d'OCSP pour l'instant) |
-| Available CAs | l'Intermediate CA uniquement |
+| Type | End Entity |
+| Available Key Algorithms | RSA |
+| Available Bit Lengths | 2048, 3072, 4096 (Ctrl+clic) |
+| Signature Algorithm | Inherit from issuing CA |
+| Validity | `1y 1mo 2d` (397 jours) |
+| Permissions *Allow … Override* | toutes décochées |
+| **Use Certificate Storage** | ☑ (sinon le certificat ne peut être ni retrouvé ni révoqué) |
+| **Store Certificate Data** | ☑ |
+| Basic Constraints | ☑ Use, ☑ Critical |
+| Key Usage | ☑ Use, ☑ Critical : Digital Signature, Key encipherment |
+| Extended Key Usage | ☑ Use : Server Authentication |
+| Subject Alternative Name | ☑ Use |
+| CRL Distribution Points | ☑ Use + **☑ Use CA defined CRL Distribution Point** |
+| Authority Information Access | ☑ Use + ☑ Use CA defined CA issuer |
+| Available CAs | `Lab-IntermediateCA-SoftHSM2` uniquement |
 
-### Profil d'entité finale `EE-TLS-YOON`
-
-**RA Functions → End Entity Profiles** → nouveau profil :
+### Profil d'entité `EE-TLS-YOON` (*RA Functions → End Entity Profiles*)
 
 | Champ | Valeur |
 |---|---|
-| Subject DN | `CN` obligatoire, `O = Yoon`, `C = SN` |
-| Subject Alternative Name | **DNS Name** obligatoire (ajouter le champ) |
-| Default / Available Certificate Profiles | `TLS-SERVER-YOON` |
-| Default / Available CAs | Intermediate CA |
-| Token | **User Generated** (la clé est créée par nous, voir 4c) |
+| Username, Password | vides ; Password ☑ Required |
+| End Entity E-mail | ☐ Use |
+| CN | vide, ☑ Required, ☑ Modifiable |
+| O | `YOON`, ☑ Required, ☐ Modifiable |
+| C | `SN`, ☑ Required, ☐ Modifiable |
+| Subject Alternative Name : DNS Name | vide, ☑ Required, **☑ Modifiable** |
+| Default / Available Certificate Profiles | `TLS-SERVER-YOON` seul |
+| Default / Available CAs | `Lab-IntermediateCA-SoftHSM2` seule |
+| Default / Available Tokens | **User Generated** seul |
 
-### CRL
+> Listes à sélection multiple : un clic simple ne garde que l'élément cliqué ; Ctrl+clic ajoute ou retire.
 
-- **Edit CA** (Root et Intermediate) : *CRL Period* = 7 jours pour l'Intermediate, 30 à 90 jours
-  pour la Root ; *CRL Issue Interval* = 1 jour pour l'Intermediate.
-- **System Functions → Services** : service *CRL Updater* actif (chaque heure) pour que EJBCA
-  régénère les CRL avant leur expiration.
-- **CA Functions → CA Certificates and CRLs** → *Create CRL* pour chaque CA, puis télécharger au
-  format **DER** et publier :
+### Vérifier ce qui est réellement enregistré
 
-```powershell
-aws s3 cp root-ca.crl          s3://pki-moustapha-2026/crl/root-ca.crl         --content-type application/pkix-crl
-aws s3 cp intermediate-ca.crl  s3://pki-moustapha-2026/crl/intermediate-ca.crl --content-type application/pkix-crl
-```
-
-Test depuis n'importe où :
+L'écran peut afficher des cases cochées qui n'ont pas été enregistrées. Contrôle fiable :
 
 ```bash
-curl -sI http://pki-moustapha-2026.s3.eu-west-3.amazonaws.com/crl/intermediate-ca.crl   # HTTP/1.1 200 OK
-curl -s  http://pki-moustapha-2026.s3.eu-west-3.amazonaws.com/crl/intermediate-ca.crl | openssl crl -inform DER -noout -issuer -lastupdate -nextupdate
+docker exec -u root ejbca-hsm-lab-ejbca-1 rm -rf /tmp/profils
+docker exec ejbca-hsm-lab-ejbca-1 mkdir -p /tmp/profils
+$EJBCA ca exportprofiles -d /tmp/profils >/dev/null
+P=/tmp/profils/certprofile_TLS-SERVER-YOON-334309444.xml
+docker exec ejbca-hsm-lab-ejbca-1 grep -i -A1 -E "<string>(usedefaultcrldistributionpoint|usecertificatestorage|storecertificatedata|useauthorityinformationaccess)</string>" $P
+docker exec ejbca-hsm-lab-ejbca-1 grep -i -A12 "<string>availablebitlengths</string>" $P | grep "<int>"
 ```
+
+Attendu : quatre `<boolean>true</boolean>`, puis `2048`, `3072`, `4096`.
+
+### Certificats de CA et CRL : récupération et publication
+
+```bash
+mkdir -p ~/pki-yoon/ca && cd ~/pki-yoon/ca
+# certificats : CA Structure & CRLs → Download PEM file (Root, puis ligne « Subordinate CA »)
+mv ~/Téléchargements/LabRootCASoftHSM2.cacert.pem          root-ca.pem
+mv ~/Téléchargements/LabIntermediateCASoftHSM2.cacert.pem  intermediate-ca.pem
+openssl x509 -in root-ca.pem         -outform DER -out root-ca.der
+openssl x509 -in intermediate-ca.pem -outform DER -out intermediate-ca.der
+openssl verify -CAfile root-ca.pem intermediate-ca.pem          # intermediate-ca.pem: OK
+
+# CRL par la CLI (pour la Root : remplacer le nom de la CA et le fichier)
+$EJBCA ca createcrl --caname "Lab-IntermediateCA-SoftHSM2"
+$EJBCA ca getcrl --caname "Lab-IntermediateCA-SoftHSM2" -f /tmp/intermediate-ca.crl
+docker cp ejbca-hsm-lab-ejbca-1:/tmp/intermediate-ca.crl intermediate-ca.crl
+openssl crl -inform DER -in intermediate-ca.crl -noout -issuer -crlnumber -nextupdate
+
+aws s3 cp root-ca.der         s3://pki-moustapha-2026/ca/root-ca.crt          --content-type application/pkix-cert
+aws s3 cp intermediate-ca.der s3://pki-moustapha-2026/ca/intermediate-ca.crt  --content-type application/pkix-cert
+aws s3 cp root-ca.crl         s3://pki-moustapha-2026/crl/root-ca.crl         --content-type application/pkix-crl
+aws s3 cp intermediate-ca.crl s3://pki-moustapha-2026/crl/intermediate-ca.crl --content-type application/pkix-crl
+curl -s http://pki-moustapha-2026.s3.eu-west-3.amazonaws.com/crl/intermediate-ca.crl | openssl crl -inform DER -noout -crlnumber -nextupdate
+```
+
+Les noms **dans le bucket** sont fixes : ils sont inscrits dans les certificats.
 
 ---
 
-## 4c. Certificat serveur de l'ALB
+## 4c. Clé, CSR et émission du certificat
 
-### Clé et CSR, sur le poste (OpenSSL)
+Dans la VM, dossier `~/pki-yoon/alb` (droits 700). `$ALB` doit être défini et non vide.
 
-La clé est générée **hors de SoftHSM** : ACM doit recevoir la clé privée en clair, ce qu'un HSM
-refuse justement de fournir. SoftHSM protège les clés **des CA** ; la clé du serveur vit dans ACM.
-
-Créer `alb.cnf` en remplaçant le nom par celui donné par `describe-load-balancers` :
-
-```ini
+```bash
+mkdir -p ~/pki-yoon/alb && chmod 700 ~/pki-yoon/alb && cd ~/pki-yoon/alb
+cat > alb.cnf <<EOF
 [req]
 prompt             = no
 distinguished_name = dn
 req_extensions     = ext
 
 [dn]
-CN = alb-moustapha-dev-755009444.eu-west-3.elb.amazonaws.com
-O  = Yoon
+CN = $ALB
+O  = YOON
 C  = SN
 
 [ext]
-subjectAltName = DNS:alb-moustapha-dev-755009444.eu-west-3.elb.amazonaws.com
+subjectAltName = DNS:$ALB
+EOF
+openssl req -new -newkey rsa:3072 -nodes -keyout alb.key -out alb.csr -config alb.cnf
+chmod 600 alb.key
+openssl req -in alb.csr -noout -verify -subject
+openssl req -in alb.csr -noout -text | grep -E "Public-Key|DNS:"
 ```
 
-Sous Windows, OpenSSL est fourni avec Git (`C:\Program Files\Git\usr\bin\openssl.exe`) ; travailler
-dans un dossier **hors de tout dépôt git**, par exemple `C:\pki-yoon\alb\`.
+Émission (création de l'entité la première fois, puis signature de la CSR) :
 
 ```bash
-openssl req -new -newkey rsa:2048 -nodes -keyout alb.key -out alb.csr -config alb.cnf
-openssl req -in alb.csr -noout -text | grep -A1 "Subject Alternative Name"
+CODE=$(openssl rand -hex 16)          # code d'enrôlement aléatoire, jamais affiché
+$EJBCA ra addendentity --username alb-yoon-dev --password "$CODE" \
+  --dn "CN=$ALB,O=YOON,C=SN" --altname "dNSName=$ALB" \
+  --caname "Lab-IntermediateCA-SoftHSM2" --type 1 --token USERGENERATED \
+  --certprofile TLS-SERVER-YOON --eeprofile EE-TLS-YOON
+docker cp alb.csr ejbca-hsm-lab-ejbca-1:/tmp/alb.csr
+$EJBCA createcert --username alb-yoon-dev --password "$CODE" -c /tmp/alb.csr -f /tmp/alb.crt
+docker cp ejbca-hsm-lab-ejbca-1:/tmp/alb.crt alb.crt
+docker exec -u root ejbca-hsm-lab-ejbca-1 rm -f /tmp/alb.csr /tmp/alb.crt
+unset CODE
 ```
 
-### Émission dans EJBCA
-
-1. **RA Functions → Add End Entity** : profil `EE-TLS-YOON`, nom d'utilisateur `alb-yoon-dev`,
-   CN et DNS Name = nom de l'ALB, mot de passe d'enrôlement (*Enrollment code*).
-2. **RA Web** (`/ejbca/ra/`) → *Enroll* → *Use username* : `alb-yoon-dev` + code, coller `alb.csr`,
-   télécharger le certificat au format **PEM** (`alb.crt`, certificat seul) et la chaîne.
-
-### Vérifications avant import
+Réémettre avec la même entité (même nom d'ALB) :
 
 ```bash
-# Le nom et l'usage
-openssl x509 -in alb.crt -noout -subject -issuer -dates -ext subjectAltName,extendedKeyUsage,crlDistributionPoints
+CODE=$(openssl rand -hex 16)
+$EJBCA ra setclearpwd --username alb-yoon-dev --password "$CODE"
+$EJBCA ra setendentitystatus --username alb-yoon-dev -S 10      # 10 = NEW
+# puis docker cp alb.csr …, createcert …, docker cp … comme ci-dessus
+```
 
-# La clé correspond au certificat (les deux empreintes doivent être identiques)
+Si le nom de l'ALB a changé, modifier le DN et le SAN de l'entité (*RA Functions → Search End Entities → Edit*),
+ou créer une nouvelle entité (ex. `alb-yoon-dev-2`).
+
+Vérifications :
+
+```bash
+openssl x509 -in alb.crt -noout -subject -issuer -dates -serial
+openssl x509 -in alb.crt -noout -ext subjectAltName,keyUsage,extendedKeyUsage,crlDistributionPoints,authorityInfoAccess
 openssl x509 -in alb.crt -noout -pubkey | openssl sha256
-openssl pkey -in alb.key -pubout       | openssl sha256
-
-# La chaîne est valide
-openssl verify -CAfile root-ca.pem -untrusted intermediate-ca.pem alb.crt
-
-# La chaîne et les CRL (PEM) : aucun certificat révoqué
-openssl crl -inform DER -in intermediate-ca.crl -out intermediate-ca.crl.pem
-openssl crl -inform DER -in root-ca.crl         -out root-ca.crl.pem
-openssl verify -crl_check_all -CAfile root-ca.pem -untrusted intermediate-ca.pem \
-  -CRLfile intermediate-ca.crl.pem -CRLfile root-ca.crl.pem alb.crt
+openssl pkey -in alb.key -pubout        | openssl sha256          # identique à la ligne précédente
+openssl verify -crl_check -CRLfile <(openssl crl -inform DER -in ../ca/intermediate-ca.crl) \
+  -CAfile ../ca/root-ca.pem -untrusted ../ca/intermediate-ca.pem alb.crt     # alb.crt: OK
 ```
 
-Toutes les commandes `verify` doivent répondre `alb.crt: OK`.
+| Élément | Attendu |
+|---|---|
+| subject / SAN | nom de l'ALB, `O = YOON`, `C = SN` |
+| issuer | `Lab-IntermediateCA-SoftHSM2` |
+| Public-Key | 3072 bit |
+| Key Usage / EKU | Digital Signature, Key Encipherment (critique) / TLS Web Server Authentication |
+| CRL Distribution Points | `URI:…/crl/intermediate-ca.crl`, sans ligne `CRL Issuer` |
+| Authority Information Access | `CA Issuers - URI:…/ca/intermediate-ca.crt` |
+| RA Web → Search → Certificates | le certificat apparaît, statut **Active** |
 
 ---
 
 ## 4d. Import dans ACM
 
-La chaîne transmise à ACM contient l'Intermediate (la Root est déjà chez les clients) :
+Premier import (nouvel ARN) :
 
-```powershell
-$env:AWS_PAGER = ""
-aws acm import-certificate `
-  --region eu-west-3 `
-  --certificate        fileb://alb.crt `
-  --private-key        fileb://alb.key `
-  --certificate-chain  fileb://intermediate-ca.pem `
-  --tags Key=Project,Value=moustapha Key=Env,Value=dev Key=Emetteur,Value=EJBCA `
-  --query CertificateArn --output text
+```bash
+cd ~/pki-yoon/alb
+ARN=$(aws acm import-certificate \
+  --certificate       fileb://alb.crt \
+  --private-key       fileb://alb.key \
+  --certificate-chain fileb://../ca/intermediate-ca.pem \
+  --tags Key=Project,Value=moustapha Key=Env,Value=dev Key=Emetteur,Value=EJBCA \
+  --query CertificateArn --output text)
+echo "$ARN" > acm-arn.txt
+aws acm describe-certificate --certificate-arn "$ARN" \
+  --query "Certificate.{Nom:DomainName,SAN:SubjectAlternativeNames,Type:Type,Statut:Status,Cle:KeyAlgorithm,Expire:NotAfter}"
 ```
 
-La commande renvoie l'ARN : `arn:aws:acm:eu-west-3:231644789895:certificate/xxxxxxxx-...`.
+Attendu : `IMPORTED`, `ISSUED`, `RSA-3072`.
 
-```powershell
-aws acm describe-certificate --region eu-west-3 --certificate-arn <ARN> `
-  --query "Certificate.{Nom:DomainName,SAN:SubjectAlternativeNames,Type:Type,Expire:NotAfter,Statut:Status}"
+Réimport (renouvellement ou correction, **même nom d'ALB**) : l'ALB prend le nouveau certificat sans changement Terraform.
+
+```bash
+aws acm import-certificate --certificate-arn "$(cat acm-arn.txt)" \
+  --certificate fileb://alb.crt --private-key fileb://alb.key \
+  --certificate-chain fileb://../ca/intermediate-ca.pem
 ```
-
-Attendu : `Type = IMPORTED`, `Statut = ISSUED`.
-
-Ensuite : **sauvegarder `alb.key` hors ligne** (clé USB chiffrée, coffre de mots de passe) ou la
-supprimer. ACM la conserve chiffrée ; elle n'est plus nécessaire pour le fonctionnement.
-
-ACM n'envoie **aucun** renouvellement automatique pour un certificat importé : surveiller la date
-`Expire` (voir [Exploitation](#exploitation--crl-renouvellement-révocation)).
 
 ---
 
-## 4e. Listener HTTPS sur l'ALB
+## 4e. Listener 443
 
-### Fichiers modifiés
+Le module `modules/alb` crée le listener 443 et transforme le port 80 en redirection quand `certificate_arn` est
+renseigné (`null` par défaut : HTTP seul). La valeur se met dans `environments/dev/terraform.tfvars`
+(fichier suivi par Git, lu par la pipeline) ; l'ARN n'est pas un secret.
 
-| Fichier | Changement |
-|---|---|
-| `modules/alb/variables.tf` | `certificate_arn` (défaut `null`) et `ssl_policy` |
-| `modules/alb/main.tf` | listener 443 si certificat ; listener 80 → redirection 301 vers HTTPS |
-| `modules/alb/outputs.tf` | `url_alb` en `https://` si certificat ; nouvelle sortie `https_enabled` |
-| `modules/alb/README.md` | section HTTPS |
-| `environments/{dev,staging,prod}/variables.tf` | `certificate_arn` (défaut `null`) |
-| `environments/{dev,staging,prod}/main.tf` | `certificate_arn = var.certificate_arn` passé au module ALB |
-| `environments/{dev,staging,prod}/outputs.tf` | `load_balancer_dns` (le nom à mettre dans le SAN) |
-
-Les trois environnements restent identiques. Sans `certificate_arn`, staging et prod ne changent pas.
-
-### Activation en dev
-
-Dans `environments/dev/terraform.tfvars` (l'ARN n'est pas un secret) :
-
-```hcl
-certificate_arn = "arn:aws:acm:eu-west-3:231644789895:certificate/xxxxxxxx-..."
+```powershell
+git fetch origin; git switch -c https-dev origin/main
+Add-Content -Path environments\dev\terraform.tfvars -Value "`ncertificate_arn = `"arn:aws:acm:eu-west-3:231644789895:certificate/…`""
+terraform fmt environments\dev\terraform.tfvars
+git diff
+git add environments/dev/terraform.tfvars
+git commit -m "feat(dev): HTTPS sur l'ALB"
+git push -u origin https-dev
 ```
 
-Pull request, puis lire le `plan` de dev **avant** de lancer l'apply :
+Plan attendu pour `dev` : `aws_lb_listener.https[0]` créé, `aws_lb_listener.http` modifié en place,
+`1 to add, 1 to change, 0 to destroy`. **Ne pas fusionner** si l'ALB, les EC2 ou RDS seraient remplacés.
+Puis *Run workflow* → `apply` / `dev`.
 
-| Attendu dans le plan | Signification |
-|---|---|
-| `module.alb.aws_lb_listener.https[0]` **will be created** | nouveau listener 443 |
-| `module.alb.aws_lb_listener.http` **will be updated in-place** | forward → redirect |
-| `0 to destroy` | rien n'est supprimé |
+Tests (VM) :
 
-> Si le plan propose de **remplacer** `module.alb.aws_lb.main` ou les instances EC2 : ne pas appliquer.
-> Le nom de l'ALB changerait et le certificat ne serait plus valable.
-
-Puis **Actions → Terraform → Run workflow** : `apply`, environnement `dev`.
-
-L'application n'a rien à modifier : nginx transmet déjà `X-Forwarded-Proto` à l'API, et le frontend
-appelle `/api` en chemin relatif (pas de contenu mixte).
+```bash
+curl -sI "http://$ALB/" | grep -iE "^HTTP|^location"                          # 301 vers https://
+curl -s --cacert ~/pki-yoon/ca/root-ca.pem "https://$ALB/healthz"; echo     # ok
+echo | openssl s_client -connect "$ALB:443" -servername "$ALB" 2>/dev/null | openssl x509 -noout -serial -ext crlDistributionPoints
+```
 
 ---
 
 ## 4f. Confiance sur les appareils et tests
 
-Seule la **Root CA** s'installe sur les appareils (`root-ca.crt`, téléchargeable depuis
-`root_cert_aia`). Ne jamais installer l'Intermediate ou le certificat serveur comme autorité.
+Installer **uniquement la Root**, depuis `http://pki-moustapha-2026.s3.eu-west-3.amazonaws.com/ca/root-ca.crt`,
+et **comparer son empreinte** avant d'accepter :
+
+```
+SHA-1 : BD:C1:3C:57:0B:FD:A2:E4:37:6D:24:8E:35:20:23:E4:29:E4:6A:5A
+```
 
 | Appareil | Installation |
 |---|---|
-| Windows (Chrome, Edge) | double-clic sur `root-ca.crt` → *Installer le certificat* → Ordinateur local → *Autorités de certification racines de confiance* |
-| Firefox | Paramètres → Vie privée et sécurité → Certificats → *Afficher les certificats* → Autorités → Importer, cocher « sites web » |
-| Android (téléphone de l'agent) | Paramètres → Sécurité → Chiffrement et identifiants → *Installer un certificat* → **Certificat CA** |
-| iPhone | ouvrir le fichier → installer le profil (Réglages → Profil téléchargé) puis Réglages → Général → Informations → *Réglages des certificats* → activer la confiance totale |
+| Windows (sans droits admin) | `certutil -user -addstore Root C:\pki-yoon\ca\root-ca.crt`, vérifier l'empreinte dans la fenêtre, **Oui** ; contrôle : `certutil -user -store Root "Lab-RootCA-SoftHSM2"` |
+| Windows (tout le PC) | même commande sans `-user`, PowerShell **administrateur** |
+| Firefox (Windows) | reprend automatiquement le magasin Windows ; sinon *Paramètres → Vie privée et sécurité → Certificats → Autorités → Importer* |
+| Android (Samsung) | toucher le fichier ne suffit pas (« Impossible d'installer les certificats AC ») : *Paramètres → Sécurité et confidentialité → Autres paramètres de sécurité → Installer depuis le stockage de l'appareil → Certificat AC → Installer quand même* |
+| iPhone | *Réglages → Profil téléchargé → Installer*, puis *Général → Informations → Réglages des certificats* : confiance totale |
 | Linux | `sudo cp root-ca.crt /usr/local/share/ca-certificates/ && sudo update-ca-certificates` |
 
-Tests :
+Vérifier dans Firefox : cadenas → *Connexion sécurisée → Plus d'informations* : « Vérifiée par : PKI LAB », TLS 1.3 ;
+*Afficher le certificat* : onglets serveur, Intermediate, Root.
 
-```bash
-ALB=alb-moustapha-dev-755009444.eu-west-3.elb.amazonaws.com
-
-# Redirection HTTP -> HTTPS
-curl -sI http://$ALB/ | grep -i "^HTTP\|^location"        # 301, Location: https://...
-
-# Chaîne présentée par l'ALB (certificat + Intermediate)
-openssl s_client -connect $ALB:443 -servername $ALB -showcerts </dev/null 2>/dev/null | grep -E "s:|i:"
-
-# Vérification complète avec notre Root
-curl -s --cacert root-ca.pem https://$ALB/healthz           # ok
-curl -s --cacert root-ca.pem https://$ALB/api/voyages | head -c 200
-```
-
-Dans le navigateur : cadenas sans avertissement, puis sur le téléphone de l'agent,
-**Scanner → Activer la caméra** doit afficher la demande d'autorisation.
+Test final (téléphone de l'agent) : se connecter en agent, *Scanner → Activer la caméra → Autoriser*, scanner un billet :
+« Billet valide », puis « Billet déjà utilisé » au second scan.
 
 ---
 
-## Exploitation : CRL, renouvellement, révocation
+## Exploitation
 
-| Tâche | Fréquence | Commande / action |
+### Publier les CRL
+
+| CRL | Validité | Commande |
 |---|---|---|
-| Publier la CRL de l'Intermediate | avant chaque *Next Update* (≤ 7 j) | télécharger depuis EJBCA, `aws s3 cp ... crl/intermediate-ca.crl` |
-| Publier la CRL de la Root | avant chaque *Next Update* | allumer la Root si hors ligne, *Create CRL*, `aws s3 cp` |
-| Renouveler le certificat de l'ALB | 30 j avant `NotAfter` | nouvelle CSR, émission, réimport (ci-dessous) |
-| ALB recréé | après un destroy/apply | 4c + 4d avec le nouveau nom, mettre à jour `certificate_arn` |
-
-**Réimport (même nom, ARN conservé, aucune modification Terraform) :**
-
-```powershell
-aws acm import-certificate --region eu-west-3 --certificate-arn <ARN-existant> `
-  --certificate fileb://alb.crt --private-key fileb://alb.key --certificate-chain fileb://intermediate-ca.pem
-```
-
-L'ALB utilise le nouveau certificat automatiquement.
-
-**Nouveau nom (ALB recréé)** : importer **sans** `--certificate-arn` (nouvel ARN), mettre l'ARN dans
-`terraform.tfvars`, appliquer, puis supprimer l'ancien certificat ACM et le révoquer dans EJBCA.
-
-**Révocation** (clé compromise, ancien nom) : EJBCA → *Search End Entities* → *Revoke* (motif
-*keyCompromise* ou *superseded*), *Create CRL*, republier `crl/intermediate-ca.crl`.
+| Intermediate | 7 jours | voir ci-dessous, chaque semaine avant *nextUpdate* |
+| Root | 30 jours | idem avec `Lab-RootCA-SoftHSM2` et `crl/root-ca.crl` |
 
 ```bash
-openssl crl -inform DER -in intermediate-ca.crl -noout -text | grep -A1 "Serial Number"
+cd ~/pki-yoon/ca
+$EJBCA ca createcrl --caname "Lab-IntermediateCA-SoftHSM2"
+$EJBCA ca getcrl --caname "Lab-IntermediateCA-SoftHSM2" -f /tmp/intermediate-ca.crl
+docker cp ejbca-hsm-lab-ejbca-1:/tmp/intermediate-ca.crl intermediate-ca.crl
+openssl crl -inform DER -in intermediate-ca.crl -noout -crlnumber -nextupdate
+aws s3 cp intermediate-ca.crl s3://pki-moustapha-2026/crl/intermediate-ca.crl --content-type application/pkix-crl
 ```
 
----
+### Si dev est recréé
 
-## Sécurité : ce qui ne doit jamais sortir
+1. Nouveau nom : `ALB=$(aws elbv2 describe-load-balancers …)`.
+2. 4c : nouvelle clé et CSR, entité mise à jour (DN et SAN), émission.
+3. 4d : import **sans** `--certificate-arn` → nouvel ARN.
+4. 4e : nouvel ARN dans `terraform.tfvars`, PR, apply.
+5. Révoquer l'ancien certificat et supprimer l'ancien certificat ACM : `aws acm delete-certificate --certificate-arn <ancien>`.
+
+### Renouveler (30 jours avant expiration)
+
+Réémission avec la même entité (`setclearpwd`, `setendentitystatus -S 10`, `createcert`), puis réimport sur le même ARN.
+
+### Révoquer un certificat
+
+```bash
+SERIAL=$(openssl x509 -in cert.crt -noout -serial | cut -d= -f2 | sed 's/^0*//')   # EJBCA : sans zéro initial
+$EJBCA ra revokecert --dn "CN=Lab-IntermediateCA-SoftHSM2,O=PKI LAB,C=FR" -s "$SERIAL" -r 4   # 4 = superseded
+```
+
+Puis publier la nouvelle CRL. Par l'interface : *RA Web → Search → Certificates* → le certificat → *Revoke*.
+
+> **Ne pas utiliser** *Revoke Selected* de *Search End Entities* pour un seul certificat : il révoque **tous** les
+> certificats de l'entité, y compris celui en service.
+
+## Sécurité
 
 | Élément | Où il vit | Jamais |
 |---|---|---|
-| Clés des Root / Intermediate CA | SoftHSM (PIN utilisateur et SO) | exportées, copiées, dans git |
-| `alb.key` | ACM (chiffrée), copie hors ligne éventuelle | dans git, dans le bucket, dans Terraform (`aws_acm_certificate` avec `private_key` la mettrait dans l'état) |
-| PIN SoftHSM, mot de passe superadmin EJBCA | coffre de mots de passe | dans un fichier du projet |
-| `root-ca.crt`, `intermediate-ca.crt`, CRL | bucket public | — ils sont publics par nature |
+| Clés de la Root et de l'Intermediate | SoftHSM, dans la VM | exportées, copiées, dans Git |
+| `alb.key` | ACM (chiffrée) et `~/pki-yoon/alb` (600) | dans Git, sur S3, dans Terraform (`aws_acm_certificate` avec `private_key` la mettrait dans l'état) |
+| Code d'enrôlement | variable `CODE` du terminal, effacée par `unset` | affiché, écrit dans un fichier |
+| `SuperAdmin.p12`, PIN SoftHSM | `~/pki-lab-backups/admin` (700/600), coffre de mots de passe | dans un fichier du projet |
+| Certificats de CA, CRL, CSR | publics | — |
 
-Le `.gitignore` du dépôt Terraform doit contenir au minimum :
-
-```
-*.key
-*.pem
-*.p12
-*.pfx
-*.csr
-*.crl
-```
-
----
+Le dossier partagé VirtualBox ne sert qu'aux fichiers publics. Prendre un instantané de la VM avant toute installation
+qui touche au noyau ; ne jamais restaurer un instantané sans vérifier sa date (un instantané antérieur au 16/10/2026
+effacerait les CA).
 
 ## Dépannage
 
-| Symptôme | Cause probable | Correction |
+| Symptôme | Cause | Correction |
 |---|---|---|
-| `NET::ERR_CERT_AUTHORITY_INVALID` | Root CA non installée sur l'appareil | 4f |
-| `NET::ERR_CERT_COMMON_NAME_INVALID` | SAN différent du nom tapé (ALB recréé, faute de frappe) | comparer `load_balancer_dns` et le SAN, réémettre |
-| `ERR_CERT_VALIDITY_TOO_LONG` | validité > 398 jours | profil `TLS-SERVER-YOON` : 397d |
-| `ValidationException` à l'import ACM | clé chiffrée, mauvais ordre, chaîne contenant le certificat serveur | `alb.key` sans mot de passe (`-nodes`), `--certificate` = certificat seul, chaîne = Intermediate |
-| `openssl verify` : `unable to get certificate CRL` | CRL non téléchargée ou périmée | republier la CRL, vérifier `nextUpdate` |
-| `CRL has expired` | CRL Updater arrêté ou CRL non republiée sur S3 | *Create CRL* puis `aws s3 cp` |
-| `curl` 403 sur le bucket | fichier hors de `crl/` ou `ca/`, ou politique bloquée au niveau du compte | chemins exacts ; 4a, blocage public du compte |
-| Caméra toujours refusée | page encore en HTTP, ou certificat non approuvé (Android ignore alors la permission) | ouvrir `https://`, installer la Root |
-| Timeout sur `:443` | règle `alb_https` absente du groupe de sécurité | vérifier le module security |
+| `NET::ERR_CERT_AUTHORITY_INVALID` | Root non installée | 4f |
+| `NET::ERR_CERT_COMMON_NAME_INVALID` | ALB recréé, nom différent du SAN | [Si dev est recréé](#si-dev-est-recréé) |
+| `ERR_CERT_VALIDITY_TOO_LONG` | validité > 398 jours | profil : `1y 1mo 2d` |
+| `LoadBalancerNotFound` | `dev` détruit | recréer, puis réémettre |
+| `Illegal key length, not authorized by certificate profile` | taille absente du profil (enregistrement raté) | corriger le profil, vérifier par `ca exportprofiles` |
+| Certificat sans CDP | *Use CA defined CRL Distribution Point* non enregistré | idem, puis réémettre et réimporter |
+| `No certificate found` à la révocation | *Use Certificate Storage* désactivé, ou zéro initial du numéro de série | activer le stockage et réémettre ; `sed 's/^0*//'` |
+| `Password decryption failed` (CLI EJBCA) | message de configuration de la CLI | sans effet |
+| `rm: Operation not permitted` dans le conteneur | fichier copié en root par `docker cp` | `docker exec -u root …` |
+| `ValidationException` à l'import ACM | clé chiffrée, ou chaîne incluant le certificat serveur | `-nodes` ; `--certificate` = certificat seul ; chaîne = Intermediate |
+| `CRL has expired` | CRL non republiée | publier la CRL |
+| `certutil … nécessite une élévation` | magasin de l'ordinateur | `certutil -user …` ou PowerShell administrateur |
+| Android : « Impossible d'installer les certificats AC » | Android 11+ | installation par les Paramètres |
+| `aws login` : « Failed to decode the verification code » | mot de passe collé au lieu du code | coller le code de vérification |
+| Avertissement `Invalid Attribute Combination` à l'apply | passage du port 80 de *forward* à *redirect* (provider) | sans effet ; vérifier au plan suivant |
