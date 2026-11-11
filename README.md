@@ -44,6 +44,7 @@ un certificat émis par notre propre PKI** (EJBCA, clés des autorités dans Sof
 | [`docs/HTTPS-REALISATION-2026-11.md`](docs/HTTPS-REALISATION-2026-11.md) | **Compte rendu** de la mise en place du HTTPS (5 au 11/11/2026) : résultats, erreurs, corrections |
 | [`docs/Yoon-rapport-deploiement-AWS-PKI-EJBCA.pdf`](docs/Yoon-rapport-deploiement-AWS-PKI-EJBCA.pdf) | Rapport complet illustré (captures d'écran), du début à la fin |
 | `modules/*/README.md` | Documentation de chaque module Terraform |
+| [`docs/HISTORIQUE-LABORATOIRE-2026-10.md`](docs/HISTORIQUE-LABORATOIRE-2026-10.md) | Ancien README : laboratoire initial du 26 au 28/10 (workspaces, tests HTTP, SSH, MySQL) |
 
 ## Architecture
 
