@@ -10,8 +10,8 @@ Il complète le [README principal](../README.md), qui documente l'infrastructure
 |---|---|---|
 | [1. Registres d'images et rôle de déploiement](#étape-1--registres-dimages-et-rôle-de-déploiement) | ECR, rôle IAM des dépôts d'application, droits de la pipeline | ✅ Appliquée le 03/11/2026 |
 | [2. Publication des images dans ECR](#étape-2--publication-des-images-dans-ecr) | Workflows des dépôts backend et frontend | ✅ Réalisée le 04/11/2026 |
-| [3. Serveurs prêts pour Docker](#étape-3--serveurs-prêts-pour-docker) | Rôle des EC2, secrets SSM, user data Docker | 🔄 Prête à appliquer en dev |
-| [4. Déploiement continu et HTTPS](#étape-4--déploiement-continu-et-https) | Mise à jour automatique des EC2, certificat sur l'ALB | ⏳ À venir |
+| [3. Serveurs prêts pour Docker](#étape-3--serveurs-prêts-pour-docker) | Rôle des EC2, secrets SSM, user data Docker | ✅ Appliquée le 04/11/2026 (PR #13, #14) |
+| [4. Déploiement continu et HTTPS](#étape-4--déploiement-continu-et-https) | Certificat EJBCA sur l'ALB ; mise à jour automatique des EC2 | ✅ HTTPS actif le 10/11/2026 (PR #15, #16) · ⏳ déploiement continu à venir |
 
 ## Sommaire
 
@@ -455,7 +455,12 @@ sudo docker logs --tail 100 api
 
 ### 4a à 4f : HTTPS avec la PKI EJBCA / SoftHSM
 
-**État : code prêt, à appliquer.** Procédure complète : [`PKI-HTTPS-YOON.md`](PKI-HTTPS-YOON.md).
+**État : en service depuis le 10/11/2026** sur `https://alb-moustapha-dev-2014044716.eu-west-3.elb.amazonaws.com`
+(TLS 1.3, certificat RSA 3072 émis par `Lab-IntermediateCA-SoftHSM2`, importé dans ACM).
+
+- Procédure : [`PKI-HTTPS-YOON.md`](PKI-HTTPS-YOON.md)
+- Compte rendu, résultats et corrections : [`HTTPS-REALISATION-2026-11.md`](HTTPS-REALISATION-2026-11.md)
+- Rapport illustré : [`Yoon-rapport-deploiement-AWS-PKI-EJBCA.pdf`](Yoon-rapport-deploiement-AWS-PKI-EJBCA.pdf)
 
 Sans nom de domaine, le certificat est émis par notre Intermediate CA pour le nom DNS de l'ALB
 (`alb-moustapha-dev-<n>.eu-west-3.elb.amazonaws.com`). Ce nom change si l'ALB est recréé :
@@ -466,6 +471,7 @@ le certificat doit alors être réémis.
 | Publication PKI | `bootstrap/pki_publication.tf`, `bootstrap/outputs_pki.tf` | bucket S3 public en lecture sur `crl/*` et `ca/*`, adresses HTTP fixes pour CDP et AIA |
 | Listener HTTPS | `modules/alb/*` | 443 avec le certificat ACM ; 80 redirige vers 443 ; inchangé si `certificate_arn = null` |
 | Environnements | `environments/{dev,staging,prod}/{main,variables,outputs}.tf` | variable `certificate_arn`, sortie `load_balancer_dns` |
+| Activation en dev (PR #16) | `environments/dev/terraform.tfvars` | `certificate_arn = "arn:aws:acm:eu-west-3:231644789895:certificate/5c6f0b7d-…"` |
 
 La clé privée du serveur est importée dans ACM par la CLI : elle n'apparaît ni dans git ni dans
 l'état Terraform.
@@ -479,7 +485,11 @@ l'état Terraform.
 
 ## Secrets et paramètres
 
-Aucun secret n'est écrit dans le code ni dans les fichiers `.tfvars` versionnés.
+Aucun secret ne doit être écrit dans le code ni dans les fichiers `.tfvars` versionnés.
+
+> **À corriger :** `environments/dev/terraform.tfvars` contient encore `db_password` en clair (historique Git).
+> La pipeline n'utilise pas cette valeur : elle passe `-var="db_password=${{ secrets.DB_PASSWORD }}"`, prioritaire
+> sur `terraform.tfvars`. Retirer la ligne (et vérifier staging et prod), puis changer le secret `DB_PASSWORD`.
 
 | Nom | Où | Utilisé par | Étape |
 |---|---|---|---|
@@ -487,6 +497,7 @@ Aucun secret n'est écrit dans le code ni dans les fichiers `.tfvars` versionné
 | `DB_PASSWORD` | secret du dépôt Terraform | `terraform plan/apply` (mot de passe RDS) | existant |
 | `AWS_DEPLOY_ROLE_ARN` | secret des dépôts backend et frontend | workflows d'image et de déploiement | 1 |
 | `/yoon/<env>/…` | AWS SSM Parameter Store | conteneur `api`, lu par `deploy.sh` | 3 |
+| `certificate_arn` (pas un secret) | `environments/dev/terraform.tfvars` | listener 443 de l'ALB | 4 |
 
 Fichiers qui ne doivent jamais être publiés (déjà couverts par `.gitignore`) :
 `*.tfstate`, `*.tfstate.*`, `.terraform/`, `*.pem`, `*.key`, `.env`.
